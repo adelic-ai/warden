@@ -42,6 +42,16 @@ def build_parser() -> argparse.ArgumentParser:
     down.add_argument("instance")
     down.add_argument("--project", default="warden")
 
+    restore = sub.add_parser(
+        "restore",
+        help="restore a snapshot and re-derive+re-prove the audit rule (§1's I6-breaks-I5 fix)",
+    )
+    restore.add_argument("instance")
+    restore.add_argument("--flavor", choices=["monitored", "builder"], required=True)
+    restore.add_argument("--llm", choices=["claude", "gemini"], required=True)
+    restore.add_argument("--project", default="warden")
+    restore.add_argument("--snapshot", default="clean")
+
     return parser
 
 
@@ -100,6 +110,29 @@ def _down(args: argparse.Namespace) -> int:
     return 0
 
 
+def _restore(args: argparse.Namespace) -> int:
+    cfg = build_config(instance=args.instance, flavor=args.flavor, llm=args.llm, project=args.project)
+    client = RealIncusClient()
+    app = WardenApp(
+        client,
+        audit_installer=RealAuditRuleInstaller(),
+        event_source_factory=lambda inst: RealEventSource(inst),
+    )
+    try:
+        event = app.restore_and_reprove(cfg, snapshot=args.snapshot)
+    except IncusNotFoundError as exc:
+        print(f"NEEDS-HUMAN: {exc}", file=sys.stderr)
+        return 2
+    if cfg.spec.auditd_wired and event is None:
+        print("error: auditd_wired but no capture event returned", file=sys.stderr)
+        return 1
+    if event is not None:
+        print(f"restore: {args.instance} re-derived + re-proven (uid={event.uid})")
+    else:
+        print(f"restore: {args.instance} restored (no auditd for this flavor)")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -107,6 +140,8 @@ def main(argv: list[str] | None = None) -> int:
         return _up(args)
     if args.command == "down":
         return _down(args)
+    if args.command == "restore":
+        return _restore(args)
     parser.error("unknown command")
     return 2  # unreachable — parser.error exits
 

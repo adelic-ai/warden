@@ -49,3 +49,12 @@ def test_down_requires_instance_positional():
     args = parser.parse_args(["down", "cap-1"])
     assert args.instance == "cap-1"
     assert args.project == "warden"
+
+
+def test_restore_requires_flavor_and_llm():
+    parser = build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["restore", "cap-1"])
+    args = parser.parse_args(["restore", "cap-1", "--flavor", "monitored", "--llm", "gemini"])
+    assert args.instance == "cap-1"
+    assert args.snapshot == "clean"
