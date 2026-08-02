@@ -22,9 +22,11 @@ Three things live here, deliberately kept independent of each other:
 from __future__ import annotations
 
 import re
+import subprocess
 import time
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
@@ -58,6 +60,13 @@ class EventSource(Protocol):
     """Something `prove_capture` can poll for freshly-captured events."""
 
     def poll(self) -> list[AuditEvent]: ...
+
+
+class AuditRuleInstaller(Protocol):
+    """Writes the persistent rule and reloads it. Needs root for real —
+    see `RealAuditRuleInstaller` and NEEDS-HUMAN.md."""
+
+    def install(self, instance: str, uid_range: "IdRange") -> None: ...
 
 
 def rule_key(instance: str) -> str:
@@ -198,3 +207,46 @@ def prove_capture(
         f"{uid_range} within {timeout}s. Do not trust `auditctl -l` here — capture is "
         "unproven, whatever the rule listing says."
     )
+
+
+# ---------------------------------------------------------------------------
+# real (root-requiring) adapters — see NEEDS-HUMAN.md
+# ---------------------------------------------------------------------------
+
+class RealAuditRuleInstaller:
+    """Writes `/etc/audit/rules.d/60-warden-<instance>.rules` and reloads
+    via `augenrules --load`. Requires root; not exercised in this build
+    (see NEEDS-HUMAN.md) but written to be run by
+    `scripts/run-acceptance-nested.sh` once root is available."""
+
+    def install(self, instance: str, uid_range: "IdRange") -> None:
+        path = Path(rule_file_path(instance))
+        path.write_text(generate_rule(uid_range, instance))
+        subprocess.run(["augenrules", "--load"], check=True)
+
+
+class RealEventSource:
+    """Prefers raw, unambiguous-epoch `ausearch --raw`; falls back to
+    reading the raw log file directly if `ausearch` isn't on PATH or the
+    caller lacks permission to invoke it. Both paths go through the same
+    dialect-tolerant `parse_events`, so this host's ausearch -i/local-time
+    quirks don't need special-casing here."""
+
+    def __init__(self, instance: str, raw_log_path: str = "/var/log/audit/audit.log"):
+        self.key = rule_key(instance)
+        self.raw_log_path = raw_log_path
+
+    def poll(self) -> list[AuditEvent]:
+        try:
+            proc = subprocess.run(
+                ["ausearch", "-k", self.key, "--raw"], capture_output=True, text=True
+            )
+            if proc.returncode == 0 and proc.stdout.strip():
+                return parse_events(proc.stdout)
+        except FileNotFoundError:
+            pass
+        try:
+            text = Path(self.raw_log_path).read_text()
+        except (FileNotFoundError, PermissionError):
+            return []
+        return [e for e in parse_events(text) if e.key == self.key]

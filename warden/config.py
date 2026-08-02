@@ -26,6 +26,7 @@ class WardenConfig:
     mem: str
     cpu: str
     spec: FlavorSpec
+    repo_url: str | None = None
 
 
 def resolve_llm_auth(
@@ -66,6 +67,7 @@ def build_config(
     mem: str = "4GiB",
     cpu: str = "2",
     extra_allow: Iterable[str] = (),
+    repo_url: str | None = None,
 ) -> WardenConfig:
     flavor_enum = Flavor(flavor)
     spec = resolve_flavor(flavor_enum, llm, extra_allow)
@@ -78,4 +80,5 @@ def build_config(
         mem=mem,
         cpu=cpu,
         spec=spec,
+        repo_url=repo_url,
     )

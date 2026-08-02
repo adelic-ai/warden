@@ -185,3 +185,27 @@ class FakeEventSource:
 
     def poll(self) -> list[AuditEvent]:
         return list(self._client.audit_log)
+
+
+class FakeAuditRuleInstaller:
+    """`auditd.AuditRuleInstaller` — records what would've been written to
+    `/etc/audit/rules.d`, without needing root to actually write it."""
+
+    def __init__(self):
+        self.installed: dict[str, "IdRange"] = {}
+
+    def install(self, instance: str, uid_range) -> None:
+        self.installed[instance] = uid_range
+
+
+class FakeProxyAllowlistController:
+    """`proxy.ProxyAllowlistController` — records the active allowlist
+    in memory instead of rewriting a file a real proxy process watches."""
+
+    def __init__(self):
+        self.current: tuple[str, ...] = ()
+        self.history: list[tuple[str, ...]] = []
+
+    def set_allowlist(self, domains: tuple[str, ...]) -> None:
+        self.current = tuple(domains)
+        self.history.append(self.current)

@@ -67,9 +67,14 @@ scope for v1 per this reading.
 ## Provisioning-vs-runtime allowlist as a reloadable file, not a proxy restart
 
 §1 says "swapping the list is not disabling the ACL" — implemented literally: the proxy reads
-its allowlist from a file and reloads it on `SIGHUP` (or before each new connection if the
-file's mtime changed), so `warden` can narrow provisioning → runtime by rewriting the file and
-signaling, without ever stopping enforcement.
+its allowlist from a file and reloads it before handling each new CONNECT if the file's
+content changed, so `warden` can narrow provisioning → runtime by rewriting the file, without
+ever stopping enforcement. Deliberately compares raw file *content*, not mtime: a first real
+test run showed this VM's filesystem can give two rewrites within the same tick an identical
+`st_mtime_ns` (confirmed: two `write_text` calls a few microseconds apart landed on the exact
+same nanosecond-resolution timestamp), which would make an mtime-only cache silently miss a
+rapid provisioning→runtime narrow. Content comparison costs a small read on each check, which
+is fine at this proxy's request volume.
 
 ## `warden down` only removes the instance, not the shared substrate
 

@@ -10,7 +10,7 @@ terminates or inspects the TLS stream, so it structurally can't MITM
 even by accident.
 
 Provisioning-vs-runtime narrowing (§1): the allowlist lives in a file
-that's reloaded whenever its mtime changes, so `warden` can swap a wide
+that's reloaded whenever its content changes, so `warden` can swap a wide
 provisioning list for a narrow runtime one by rewriting the file — the
 ACL is never disabled, just re-scoped.
 """
@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from typing import Protocol
 
 CONNECT_OK = b"HTTP/1.1 200 Connection Established\r\n\r\n"
 CONNECT_FORBIDDEN = b"HTTP/1.1 403 Forbidden\r\n\r\n"
@@ -36,6 +37,25 @@ def _domain_match(host: str, allowed: str) -> bool:
     return host == allowed or host.endswith("." + allowed)
 
 
+class ProxyAllowlistController(Protocol):
+    """What `warden/app.py` needs to swap the allowlist — provisioning-
+    wide during setup, narrowed to runtime after (§1)."""
+
+    def set_allowlist(self, domains: tuple[str, ...]) -> None: ...
+
+
+class RealProxyAllowlistController:
+    """Rewrites the allowlist file the running `AllowlistProxy` watches.
+    No root needed — the file just needs to be under a path the proxy
+    process and `warden` both have access to."""
+
+    def __init__(self, allowlist_path: Path):
+        self.allowlist_path = Path(allowlist_path)
+
+    def set_allowlist(self, domains: tuple[str, ...]) -> None:
+        write_allowlist(self.allowlist_path, list(domains))
+
+
 class AllowlistProxy:
     """A CONNECT-only forward proxy that allows a request iff the target
     host matches (exactly, or as a subdomain of) an entry in the allowlist
@@ -46,23 +66,29 @@ class AllowlistProxy:
         self.host = host
         self.port = port
         self._allowlist: frozenset[str] = frozenset()
-        self._mtime: float | None = None
+        self._raw: bytes | None = None
         self._server: asyncio.base_events.Server | None = None
 
     def _reload_if_changed(self) -> None:
         try:
-            mtime = self.allowlist_path.stat().st_mtime
+            raw = self.allowlist_path.read_bytes()
         except FileNotFoundError:
             self._allowlist = frozenset()
-            self._mtime = None
+            self._raw = None
             return
-        if mtime == self._mtime:
+        # Compare raw content, not mtime: a rapid provisioning->runtime
+        # rewrite can land within one filesystem timestamp tick (some
+        # filesystems here round to whole seconds), which would make an
+        # mtime-based cache silently miss the change. Content comparison
+        # is slightly more work but is the only thing that's actually
+        # correct, and these files are tiny.
+        if raw == self._raw:
             return
-        lines = self.allowlist_path.read_text().splitlines()
+        lines = raw.decode().splitlines()
         self._allowlist = frozenset(
             line.strip().lower() for line in lines if line.strip() and not line.strip().startswith("#")
         )
-        self._mtime = mtime
+        self._raw = raw
 
     def is_allowed(self, host: str) -> bool:
         self._reload_if_changed()
