@@ -42,6 +42,7 @@ class FakeIncusClient:
         self.networks: dict[str, dict[str, str]] = {}
         self.instances: dict[tuple[str, str], _Instance] = {}
         self.audit_log: list[AuditEvent] = []
+        self.exec_calls: list[tuple[str, list[str]]] = []
         self._serial = 0
 
     # -- internal ---------------------------------------------------------
@@ -126,6 +127,7 @@ class FakeIncusClient:
         env: dict[str, str] | None = None,
     ) -> ExecResult:
         inst = self._require_instance(name, project)
+        self.exec_calls.append((name, list(argv)))
         if not inst.running:
             return ExecResult(1, "", f"{name} is not running")
 
