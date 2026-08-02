@@ -53,12 +53,16 @@ tests/
 ```
 python3 -m warden.cli up --flavor monitored --host local --llm gemini --project warden
 python3 -m warden.cli up --flavor builder   --host local --llm claude --project warden
+python3 -m warden.cli restore <instance-name> --flavor monitored --llm gemini  # I6-breaks-I5 fix
 python3 -m warden.cli down <instance-name>
 ```
 
-Requires a real `incus` on PATH and root for the auditd/nftables install steps (see
-`scripts/install-incus-nested.sh`). Without those, `up` fails fast with a clear error
-rather than pretending to succeed.
+Requires a real `incus` on PATH. `up`/`down`/`restore` themselves need no root beyond
+whatever the invoking user already has with `incus` (sudo, or membership in the host's
+`incus` group — §1's `gembox` operator model falls out of this for free, see DECISIONS.md).
+Root is only needed once, up front, for `scripts/install-incus-nested.sh` and for the
+auditd/nftables installers. Without a real `incus`, `up` fails fast with a clear
+`IncusNotFoundError` rather than pretending to succeed.
 
 ## Tests
 
@@ -66,4 +70,6 @@ rather than pretending to succeed.
 python3 -m pytest tests/ -v
 ```
 
-No external dependencies beyond `pytest` (already present in this VM's user site-packages).
+64 tests, all passing in this VM. No external dependencies beyond `pytest` (already present
+in this VM's user site-packages). One marked `network` (`tests/test_proxy.py`'s live-TLS
+test) needs outbound connectivity; everything else is fully offline.

@@ -85,6 +85,17 @@ for the shared substrate is out of scope for v1 (not asked for, and tearing down
 other instances might still reference is exactly the kind of irreversible host-level action
 the operating instructions say to be careful with).
 
+## Operator model: `warden` itself never requires root, only installation does
+
+§1 says the `gembox` restricted-`incus`-group operator is optional — sudo+root works too,
+the idmap is what contains, not the operator's privilege level. This falls out of the design
+for free rather than needing special-casing: `warden/incus.py`'s `RealIncusClient` just shells
+out to `incus` with whatever privileges the invoking user already has. If that user is in the
+host's `incus` group, `warden up`/`down`/`restore` need no sudo at all. Only
+`scripts/install-incus-nested.sh` (package install, `incus admin init`) and the auditd/nftables
+installers (`RealAuditRuleInstaller`, the nft ruleset loader) are root-only, and they're the
+one-time/host-level pieces, not per-instance operation.
+
 ## No root in this build VM — see `NEEDS-HUMAN.md`
 
 The single largest decision this build made: rather than blocking on root access, built and
