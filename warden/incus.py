@@ -24,6 +24,18 @@ class IncusCommandError(RuntimeError):
         super().__init__(f"`{' '.join(argv)}` exited {returncode}: {stderr.strip()}")
 
 
+class IncusNotFoundError(RuntimeError):
+    """No `incus` binary on PATH — a clear, actionable failure instead of
+    a raw FileNotFoundError traceback. See NEEDS-HUMAN.md and
+    scripts/install-incus-nested.sh."""
+
+    def __init__(self, binary: str):
+        super().__init__(
+            f"{binary!r} not found on PATH. Incus isn't installed here — see "
+            "NEEDS-HUMAN.md and scripts/install-incus-nested.sh (needs root)."
+        )
+
+
 @dataclass(frozen=True)
 class ExecResult:
     returncode: int
@@ -84,10 +96,13 @@ class RealIncusClient:
 
     def _run(self, args: list[str], *, input_bytes: bytes | None = None) -> subprocess.CompletedProcess:
         argv = [self._bin, *args]
-        return subprocess.run(
-            argv, capture_output=True, input=input_bytes,
-            text=input_bytes is None,
-        )
+        try:
+            return subprocess.run(
+                argv, capture_output=True, input=input_bytes,
+                text=input_bytes is None,
+            )
+        except FileNotFoundError:
+            raise IncusNotFoundError(self._bin) from None
 
     def _run_ok(self, args: list[str], *, input_bytes: bytes | None = None) -> subprocess.CompletedProcess:
         proc = self._run(args, input_bytes=input_bytes)
