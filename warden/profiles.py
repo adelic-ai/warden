@@ -22,6 +22,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from warden.egress import ACL_NAME as EGRESS_ACL_NAME
+
 IMAGE = "images:debian/12"
 BRIDGE_NAME = "wardenbr0"
 # Pinned, not `auto` — chosen out of the CG-NAT range (RFC 6598), which is
@@ -29,7 +31,12 @@ BRIDGE_NAME = "wardenbr0"
 # 192.168.0.0/16, both extremely common LAN choices this must not collide
 # with).
 BRIDGE_SUBNET = "100.89.0.1/24"
+BRIDGE_GATEWAY = BRIDGE_SUBNET.split("/")[0]
 STORAGE_POOL = "wardenpool"
+STORAGE_DRIVER = "btrfs"
+# The host-side allowlist proxy binds the bridge gateway on this port. It is
+# the container's only permitted destination (see egress.py).
+PROXY_PORT = 3128
 
 
 class ProfileValidationError(RuntimeError):
@@ -47,8 +54,16 @@ def project_config() -> dict[str, str]:
         "restricted.devices.disk": "block",
         "restricted.devices.disk.paths": "",
         "restricted.devices.nic": "managed",
-        "restricted.networks.subnets": f"{BRIDGE_NAME}",
-        # default-drop is the baseline; egress.py adds the explicit allows.
+        # `restricted=true` blocks snapshot creation by default, and the
+        # design REQUIRES the clean snapshot + restore (I6). Without this
+        # the first real run got "Project warden doesn't allow for snapshot
+        # creation" — the same finding the capsule build recorded as D9.
+        "restricted.snapshots": "allow",
+        # Confine the project to the one bridge warden controls. NOTE:
+        # `restricted.networks.subnets` is deliberately absent — it takes
+        # `<uplink>:<subnet>` pairs, not a network name, and setting it to
+        # a bare bridge name is rejected. `restricted.storage.pools` is
+        # likewise not set: the pool simply has to exist.
         "restricted.networks.access": f"{BRIDGE_NAME}",
     }
 
@@ -87,10 +102,16 @@ def build_profile(
     cpu: str = "2",
     pool: str = STORAGE_POOL,
     bridge: str = BRIDGE_NAME,
+    acl: str = EGRESS_ACL_NAME,
 ) -> ProfileSpec:
     devices = {
         "root": {"type": "disk", "pool": pool, "path": "/"},
-        "eth0": {"type": "nic", "network": bridge},
+        # security.acls is what actually enforces egress — the ACL rides on
+        # the NIC device, so it cannot leak onto another bridge the way a
+        # host-wide nft table would. Attaching it at the *profile* is the
+        # fail-safe direction: anything launched into the project inherits
+        # it, rather than failing open if someone forgets a per-instance flag.
+        "eth0": {"type": "nic", "network": bridge, "security.acls": acl},
     }
     validate_no_host_mounts(devices)
     config = {

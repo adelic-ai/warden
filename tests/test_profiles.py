@@ -14,9 +14,19 @@ def test_project_config_requires_features_profiles_with_restricted():
     assert cfg["features.profiles"] == "true"
 
 
-def test_project_config_pins_bridge_not_auto():
+def test_project_config_confines_the_project_to_wardens_bridge():
     cfg = project_config()
-    assert "auto" not in cfg["restricted.networks.subnets"]
+    assert cfg["restricted.networks.access"] == "wardenbr0"
+    # `restricted.networks.subnets` takes <uplink>:<subnet> pairs, not a
+    # bare network name; setting it to one is rejected by Incus. The first
+    # real run's project had it silently absent as a result.
+    assert "restricted.networks.subnets" not in cfg
+
+
+def test_project_config_allows_snapshots():
+    """`restricted=true` blocks snapshot creation by default, and the clean
+    snapshot + restore is load-bearing for I6."""
+    assert project_config()["restricted.snapshots"] == "allow"
 
 
 def test_build_profile_no_privileged_no_nesting():

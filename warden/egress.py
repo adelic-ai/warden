@@ -1,56 +1,151 @@
 """Bridge egress ACL — default-drop, no interception (§1).
 
-- `drop`, never `reject`, on the bridge ACLs (silent drop; a `reject`
-  hands a scanning workload a clean, fast signal about what's closed).
-- No explicit broad rule (e.g. a `10.0.0.0/8` drop) ahead of the specific
-  allow — that's exactly the kind of rule that can *shadow* a later `/32`
-  allow depending on evaluation order. Instead: chain policy is `drop`,
-  full stop, and the only rules added are narrow `accept`s for established/
-  related traffic and the one path to the host-side proxy. Nothing needs
-  to explicitly drop the LAN; the policy already does that for everything
-  not explicitly allowed.
+**This module used to only *generate* an nftables ruleset that nothing
+ever loaded.** The first real-Incus run found the consequence: egress was
+entirely unenforced (`example.com` and the LAN gateway both reachable).
+See DECISIONS.md "D13 — egress is enforced with Incus network ACLs, not a
+host nft table".
+
+The enforcement point is now `incus network acl`, applied to the warden
+bridge and to the NIC device in warden's profile. Two reasons this beats
+the host-nft-table design it replaces:
+
+1. **A host nft table cannot be scoped to our bridge safely.** nftables
+   evaluates every table's chain at a hook, and a `policy drop` forward
+   chain in `table inet warden` drops packets for *every* bridge on the
+   host — including the unrelated gemini-capsule build sharing this
+   machine. Incus ACLs attach to a device, so they can't leak.
+2. Incus already owns `table inet incus` for bridge filtering; a second
+   table racing it is the kind of thing that works until it doesn't.
+
+Rule shape is carried over from the capsule build, which measured these
+behaviours on this same Incus 7.3 host:
+
+- `drop`, never `reject` — a `reject` hands a scanning workload a clean,
+  fast signal about what's closed. (The capsule also found `reject` is
+  accepted at rule-creation but not actually enforced on bridges.)
+- Specific `drop`s **outrank** broad `allow`s on Incus 7.3 bridges
+  (capsule T8), so the LAN drops below genuinely bite.
+- No `100.64.0.0/10` (or any) drop covering the bridge itself: that would
+  shadow the `/32` allows for the proxy and resolver and cut the only
+  permitted path. Everything not explicitly allowed is already denied by
+  the network's default-drop action, which needs no ordering assumption.
 """
 
 from __future__ import annotations
 
-TABLE_NAME = "warden"
+ACL_NAME = "warden-egress"
+
+# Private ranges a sandboxed workload has no business reaching. The bridge's
+# own subnet is deliberately absent — see the module docstring.
+LAN_DROPS: tuple[str, ...] = (
+    "192.168.0.0/16",
+    "172.16.0.0/12",
+    "10.0.0.0/8",
+)
 
 
-def generate_nft_ruleset(bridge: str, proxy_port: int) -> str:
-    """Guest instances may only reach the host-side proxy port on the
-    bridge gateway — never anything else, guest-to-guest included. All
-    real egress is mediated by `warden/proxy.py`'s allowlist; this
-    ruleset's job is only to make sure nothing can route around it.
+class EgressPolicyError(RuntimeError):
+    """A generated ACL document would not actually enforce egress."""
+
+
+def build_acl_document(gateway: str, proxy_port: int) -> dict:
+    """The one path out is the host-side allowlist proxy on the bridge
+    gateway. DNS and DHCP to the gateway are permitted because the bridge
+    is the container's only resolver and lease source; everything else —
+    guest-to-guest included — falls through to the network's default drop.
     """
-    return (
-        f"table inet {TABLE_NAME} {{\n"
-        f"    chain forward {{\n"
-        f"        type filter hook forward priority 0; policy drop;\n"
-        f"        ct state established,related accept\n"
-        f'        iifname "{bridge}" oifname "{bridge}" drop\n'
-        f"    }}\n"
-        f"    chain input {{\n"
-        f"        type filter hook input priority 0; policy accept;\n"
-        f'        iifname "{bridge}" tcp dport {proxy_port} accept\n'
-        f'        iifname "{bridge}" drop\n'
-        f"    }}\n"
-        f"}}\n"
-    )
+    gw32 = f"{gateway}/32"
+    egress: list[dict] = [
+        {
+            "action": "allow",
+            "protocol": "tcp",
+            "destination": gw32,
+            "destination_port": str(proxy_port),
+            "state": "enabled",
+        },
+        {
+            "action": "allow",
+            "protocol": "udp",
+            "destination": gw32,
+            "destination_port": "53",
+            "state": "enabled",
+        },
+        {
+            "action": "allow",
+            "protocol": "tcp",
+            "destination": gw32,
+            "destination_port": "53",
+            "state": "enabled",
+        },
+        # DHCP client -> server. Required because the network default is
+        # drop in both directions; without it the container never gets a
+        # lease and comes up with no address at all.
+        {
+            "action": "allow",
+            "protocol": "udp",
+            "destination": gw32,
+            "destination_port": "67",
+            "state": "enabled",
+        },
+    ]
+    egress += [
+        {"action": "drop", "destination": cidr, "state": "enabled"} for cidr in LAN_DROPS
+    ]
+    ingress: list[dict] = [
+        {
+            "action": "allow",
+            "protocol": "udp",
+            "source": gw32,
+            "destination_port": "68",
+            "state": "enabled",
+        },
+    ]
+    return {"config": {}, "description": "warden egress: proxy-only", "egress": egress, "ingress": ingress}
 
 
-def assert_no_reject_and_correct_ordering(ruleset: str, bridge: str, proxy_port: int) -> None:
-    """A guard a caller can run before loading the ruleset. Not exhaustive
-    nftables validation — just the two footguns the spec calls out."""
-    if "reject" in ruleset:
-        raise ValueError("ruleset uses `reject` — bridge ACLs must use `drop`")
-    accept_line = f'iifname "{bridge}" tcp dport {proxy_port} accept'
-    drop_line = f'iifname "{bridge}" drop'
-    accept_idx = ruleset.find(accept_line)
-    drop_idx = ruleset.find(drop_line)
-    if accept_idx == -1:
-        raise ValueError("ruleset is missing the proxy-port accept rule")
-    if drop_idx != -1 and drop_idx < accept_idx:
-        raise ValueError(
-            "a generic drop rule appears before the specific proxy-port accept — "
-            "this would shadow it depending on nft evaluation order"
+def _ip_to_int(addr: str) -> int:
+    parts = [int(p) for p in addr.split(".")]
+    if len(parts) != 4 or any(p < 0 or p > 255 for p in parts):
+        raise ValueError(f"not an IPv4 address: {addr!r}")
+    return (parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]
+
+
+def _cidr_contains(cidr: str, addr: str) -> bool:
+    net, _, bits_s = cidr.partition("/")
+    bits = int(bits_s) if bits_s else 32
+    mask = ((1 << bits) - 1) << (32 - bits) if bits else 0
+    return (_ip_to_int(net) & mask) == (_ip_to_int(addr) & mask)
+
+
+def assert_enforceable(document: dict, gateway: str, proxy_port: int) -> None:
+    """Guard a caller runs before pushing the ACL. Not exhaustive Incus
+    validation — just the three footguns this build has actually hit."""
+    rules = list(document.get("egress", [])) + list(document.get("ingress", []))
+
+    if any(rule.get("action") == "reject" for rule in rules):
+        raise EgressPolicyError("ACL uses `reject` — bridge ACLs must use `drop`")
+
+    proxy_allow = [
+        rule
+        for rule in document.get("egress", [])
+        if rule.get("action") == "allow"
+        and rule.get("destination") == f"{gateway}/32"
+        and rule.get("destination_port") == str(proxy_port)
+    ]
+    if not proxy_allow:
+        raise EgressPolicyError(
+            f"ACL has no allow for the proxy at {gateway}:{proxy_port} — "
+            "the container would have no permitted path out at all"
         )
+
+    # The shadowing footgun: a drop covering the bridge gateway would cut
+    # the proxy/resolver allows above, and (capsule T8) drops outrank
+    # allows on this Incus, so it would win.
+    for rule in document.get("egress", []):
+        dest = rule.get("destination")
+        if rule.get("action") == "drop" and dest and _cidr_contains(dest, gateway):
+            raise EgressPolicyError(
+                f"drop rule {dest} covers the bridge gateway {gateway} — it would shadow "
+                "the proxy and resolver allows and leave the container with no egress at all"
+            )

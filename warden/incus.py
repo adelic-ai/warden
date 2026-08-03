@@ -58,6 +58,7 @@ class IncusClient(Protocol):
     def network_exists(self, name: str) -> bool: ...
     def instance_exists(self, name: str, project: str) -> bool: ...
     def snapshot_exists(self, name: str, snapshot: str, project: str) -> bool: ...
+    def storage_pool_exists(self, name: str) -> bool: ...
 
     # -- create / define ----------------------------------------------------
     def project_create(self, name: str, config: dict[str, str]) -> None: ...
@@ -65,9 +66,22 @@ class IncusClient(Protocol):
         self, name: str, project: str, config: dict[str, str], devices: dict[str, dict]
     ) -> None: ...
     def network_create(self, name: str, config: dict[str, str]) -> None: ...
+    def storage_pool_create(self, name: str, driver: str = "btrfs") -> None: ...
     def launch(
         self, image: str, name: str, project: str, profile: str
     ) -> None: ...
+
+    # -- convergence: project / network / profile-device settings ------------
+    def project_set(self, name: str, key: str, value: str) -> None: ...
+    def project_unset(self, name: str, key: str) -> None: ...
+    def network_set(self, name: str, key: str, value: str) -> None: ...
+    def profile_device_set(
+        self, profile: str, project: str, device: str, key: str, value: str
+    ) -> None: ...
+
+    # -- network ACLs (the egress enforcement point) -------------------------
+    def network_acl_get(self, name: str) -> dict | None: ...
+    def network_acl_put(self, name: str, document: dict) -> None: ...
 
     # -- instance config / lifecycle ----------------------------------------
     def config_get(self, name: str, key: str, project: str = "default") -> str: ...
@@ -129,11 +143,55 @@ class RealIncusClient:
             ["config", "show", f"{name}/{snapshot}", "--project", project]
         ).returncode == 0
 
+    def storage_pool_exists(self, name: str) -> bool:
+        return self._run(["storage", "show", name]).returncode == 0
+
     # -- create -----------------------------------------------------------
     def project_create(self, name: str, config: dict[str, str]) -> None:
         self._run_ok(["project", "create", name])
         for key, value in config.items():
             self._run_ok(["project", "set", name, key, value])
+
+    def storage_pool_create(self, name: str, driver: str = "btrfs") -> None:
+        self._run_ok(["storage", "create", name, driver])
+
+    # -- convergence ---------------------------------------------------------
+    def project_set(self, name: str, key: str, value: str) -> None:
+        self._run_ok(["project", "set", name, key, value])
+
+    def project_unset(self, name: str, key: str) -> None:
+        self._run_ok(["project", "unset", name, key])
+
+    def network_set(self, name: str, key: str, value: str) -> None:
+        self._run_ok(["network", "set", name, key, value])
+
+    def profile_device_set(
+        self, profile: str, project: str, device: str, key: str, value: str
+    ) -> None:
+        self._run_ok(
+            ["profile", "device", "set", profile, device, f"{key}={value}", "--project", project]
+        )
+
+    # -- network ACLs ---------------------------------------------------------
+    def network_acl_get(self, name: str) -> dict | None:
+        proc = self._run(["query", f"/1.0/network-acls/{name}"])
+        if proc.returncode != 0:
+            return None
+        try:
+            return json.loads(proc.stdout)
+        except json.JSONDecodeError:
+            return None
+
+    def network_acl_put(self, name: str, document: dict) -> None:
+        """Create the ACL if absent, then push the whole document.
+
+        `incus network acl edit` takes YAML on stdin, and JSON is valid
+        YAML — so one `edit` converges the entire rule set rather than
+        accumulating `rule add`s that can never be un-added idempotently.
+        """
+        if self.network_acl_get(name) is None:
+            self._run_ok(["network", "acl", "create", name])
+        self._run_ok(["network", "acl", "edit", name], input_bytes=json.dumps(document).encode())
 
     def profile_create(
         self, name: str, project: str, config: dict[str, str], devices: dict[str, dict]

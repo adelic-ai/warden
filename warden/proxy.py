@@ -18,6 +18,10 @@ ACL is never disabled, just re-scoped.
 from __future__ import annotations
 
 import asyncio
+import socket
+import subprocess
+import sys
+import time
 from pathlib import Path
 from typing import Protocol
 
@@ -37,23 +41,62 @@ def _domain_match(host: str, allowed: str) -> bool:
     return host == allowed or host.endswith("." + allowed)
 
 
+def _parse_absolute_uri(target: str) -> tuple[str, int, str] | None:
+    """`http://host[:port]/path` -> (host, port, origin-form path).
+
+    Returns None for anything that isn't absolute-form http, including
+    https:// (which a client must reach via CONNECT, not this path).
+    """
+    if not target.lower().startswith("http://"):
+        return None
+    rest = target[len("http://"):]
+    authority, slash, path = rest.partition("/")
+    path = f"/{path}" if slash else "/"
+    host, _, port_s = authority.rpartition(":")
+    if not host:  # no colon at all -> rpartition put everything in port_s
+        host, port = port_s, 80
+    else:
+        try:
+            port = int(port_s)
+        except ValueError:
+            return None
+    if not host:
+        return None
+    return host, port, path
+
+
 class ProxyAllowlistController(Protocol):
     """What `warden/app.py` needs to swap the allowlist — provisioning-
-    wide during setup, narrowed to runtime after (§1)."""
+    wide during setup, narrowed to runtime after (§1) — and to guarantee
+    something is actually serving it."""
 
     def set_allowlist(self, domains: tuple[str, ...]) -> None: ...
+    def ensure_running(self) -> bool: ...
 
 
 class RealProxyAllowlistController:
-    """Rewrites the allowlist file the running `AllowlistProxy` watches.
-    No root needed — the file just needs to be under a path the proxy
-    process and `warden` both have access to."""
+    """Rewrites the allowlist file the running `AllowlistProxy` watches,
+    and starts that proxy if it isn't up.
 
-    def __init__(self, allowlist_path: Path):
+    Writing the file was previously the whole of it, which is how the
+    first real run ended up with a carefully-narrowed allowlist that no
+    process was reading and egress that was never enforced."""
+
+    def __init__(self, allowlist_path: Path, bind: str = "127.0.0.1", port: int = 3128):
         self.allowlist_path = Path(allowlist_path)
+        self.bind = bind
+        self.port = port
 
     def set_allowlist(self, domains: tuple[str, ...]) -> None:
         write_allowlist(self.allowlist_path, list(domains))
+
+    def ensure_running(self) -> bool:
+        # Write an empty allowlist first if there is none: the proxy must
+        # never start out permissive by virtue of a missing file.
+        if not self.allowlist_path.exists():
+            self.allowlist_path.parent.mkdir(parents=True, exist_ok=True)
+            write_allowlist(self.allowlist_path, [])
+        return ensure_running(self.allowlist_path, self.bind, self.port)
 
 
 class AllowlistProxy:
@@ -101,45 +144,100 @@ class AllowlistProxy:
             if not request_line:
                 return
             try:
-                method, target, _version = request_line.decode().strip().split()
+                method, target, version = request_line.decode().strip().split()
             except ValueError:
                 writer.write(CONNECT_BAD_METHOD)
                 await writer.drain()
                 return
-            # drain headers to the blank line
+            # Collect, don't discard: a plain-HTTP request has to be
+            # replayed to the origin server, headers and all.
+            headers: list[bytes] = []
             while True:
                 header = await reader.readline()
                 if header in (b"\r\n", b""):
                     break
-            if method.upper() != "CONNECT":
-                writer.write(CONNECT_BAD_METHOD)
-                await writer.drain()
-                return
-            host, _, port_s = target.rpartition(":")
-            try:
-                port = int(port_s)
-            except ValueError:
-                writer.write(CONNECT_BAD_METHOD)
-                await writer.drain()
-                return
-            if not self.is_allowed(host):
-                writer.write(CONNECT_FORBIDDEN)
-                await writer.drain()
-                return
-            try:
-                remote_reader, remote_writer = await asyncio.open_connection(host, port)
-            except OSError:
-                writer.write(CONNECT_BAD_GATEWAY)
-                await writer.drain()
-                return
-            writer.write(CONNECT_OK)
-            await writer.drain()
-            await asyncio.gather(
-                self._pump(reader, remote_writer),
-                self._pump(remote_reader, writer),
-            )
+                headers.append(header)
+
+            if method.upper() == "CONNECT":
+                await self._handle_connect(target, reader, writer)
+            else:
+                await self._handle_plain(method, target, version, headers, reader, writer)
         finally:
             writer.close()
+
+    async def _handle_connect(
+        self, target: str, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        host, _, port_s = target.rpartition(":")
+        try:
+            port = int(port_s)
+        except ValueError:
+            writer.write(CONNECT_BAD_METHOD)
+            await writer.drain()
+            return
+        if not self.is_allowed(host):
+            writer.write(CONNECT_FORBIDDEN)
+            await writer.drain()
+            return
+        try:
+            remote_reader, remote_writer = await asyncio.open_connection(host, port)
+        except OSError:
+            writer.write(CONNECT_BAD_GATEWAY)
+            await writer.drain()
+            return
+        writer.write(CONNECT_OK)
+        await writer.drain()
+        await asyncio.gather(
+            self._pump(reader, remote_writer),
+            self._pump(remote_reader, writer),
+        )
+
+    async def _handle_plain(
+        self,
+        method: str,
+        target: str,
+        version: str,
+        headers: list[bytes],
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        """Absolute-form plain HTTP (`GET http://host/path HTTP/1.1`).
+
+        Needed because Debian's apt repositories are plain http, so a
+        CONNECT-only proxy cannot provision a container at all — the
+        first real-Incus run's `git` install had no path out. Allowlisting
+        is on the same hostname, so http and https are governed by one
+        list; there is still no interception of the https path.
+        """
+        parsed = _parse_absolute_uri(target)
+        if parsed is None:
+            # Origin-form request: the client didn't think it was talking
+            # to a proxy, so there's no hostname to authorize against.
+            writer.write(CONNECT_BAD_METHOD)
+            await writer.drain()
+            return
+        host, port, path = parsed
+        if not self.is_allowed(host):
+            writer.write(CONNECT_FORBIDDEN)
+            await writer.drain()
+            return
+        try:
+            remote_reader, remote_writer = await asyncio.open_connection(host, port)
+        except OSError:
+            writer.write(CONNECT_BAD_GATEWAY)
+            await writer.drain()
+            return
+        # Rewrite absolute-form to origin-form and drop hop-by-hop proxy
+        # headers; everything else is relayed untouched.
+        out = [f"{method} {path} {version}\r\n".encode()]
+        out += [h for h in headers if not h.lower().startswith(b"proxy-")]
+        out.append(b"\r\n")
+        remote_writer.write(b"".join(out))
+        await remote_writer.drain()
+        await asyncio.gather(
+            self._pump(reader, remote_writer),
+            self._pump(remote_reader, writer),
+        )
 
     @staticmethod
     async def _pump(src: asyncio.StreamReader, dst: asyncio.StreamWriter) -> None:
@@ -170,3 +268,67 @@ class AllowlistProxy:
         if self._server is not None:
             self._server.close()
             await self._server.wait_closed()
+
+
+# ---------------------------------------------------------------------------
+# running it for real — `warden up` self-provisions the proxy the same way it
+# self-provisions the bridge, so there is no "…and separately start the proxy"
+# step for an operator to forget (which is how the first real run ended up
+# with an allowlist file nothing was reading).
+# ---------------------------------------------------------------------------
+
+def is_listening(host: str, port: int, timeout: float = 0.5) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(timeout)
+        return sock.connect_ex((host, port)) == 0
+
+
+def run_forever(allowlist_path: Path, host: str, port: int) -> None:
+    """Foreground proxy — the body of `warden proxy`."""
+    proxy = AllowlistProxy(allowlist_path, host=host, port=port)
+
+    async def _main() -> None:
+        await proxy.start()
+        await proxy.serve_forever()
+
+    asyncio.run(_main())
+
+
+def ensure_running(
+    allowlist_path: Path,
+    host: str,
+    port: int,
+    log_path: Path | None = None,
+    timeout: float = 10.0,
+) -> bool:
+    """Start a detached proxy if nothing is already listening.
+
+    Returns True if this call started one. Idempotent: a re-run of
+    `warden up` finds the existing proxy and leaves it alone.
+    """
+    if is_listening(host, port):
+        return False
+    log_path = Path(log_path) if log_path else Path(allowlist_path).parent / "proxy.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(log_path, "ab")
+    subprocess.Popen(
+        [
+            sys.executable, "-m", "warden.cli", "proxy",
+            "--allowlist-file", str(allowlist_path),
+            "--bind", host,
+            "--port", str(port),
+        ],
+        stdout=handle,
+        stderr=handle,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,  # survives the `warden up` that spawned it
+        cwd=str(Path(__file__).resolve().parent.parent),
+    )
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if is_listening(host, port):
+            return True
+        time.sleep(0.2)
+    raise RuntimeError(
+        f"allowlist proxy did not come up on {host}:{port} within {timeout}s — see {log_path}"
+    )

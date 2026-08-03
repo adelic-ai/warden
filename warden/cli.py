@@ -12,11 +12,12 @@ import argparse
 import sys
 from pathlib import Path
 
-from warden.app import WardenApp
+from warden import profiles
+from warden.app import ProvisioningError, WardenApp
 from warden.auditd import RealAuditRuleInstaller, RealEventSource
 from warden.config import NeedsHumanError, build_config, resolve_llm_auth
 from warden.incus import IncusCommandError, IncusNotFoundError, RealIncusClient
-from warden.proxy import RealProxyAllowlistController
+from warden.proxy import RealProxyAllowlistController, run_forever
 
 DEFAULT_ALLOWLIST_FILE = Path.home() / ".warden" / "allowlist.txt"
 
@@ -37,10 +38,23 @@ def build_parser() -> argparse.ArgumentParser:
     up.add_argument("--repo", default=None, dest="repo_url", help="repo to clone (builder only)")
     up.add_argument("--secret-file", type=Path, default=None, help="gemini API key file")
     up.add_argument("--allowlist-file", type=Path, default=DEFAULT_ALLOWLIST_FILE)
+    up.add_argument(
+        "--pool", default=profiles.STORAGE_POOL,
+        help="storage pool; created (btrfs) if absent",
+    )
 
     down = sub.add_parser("down", help="remove a sandboxed instance (host substrate is unchanged)")
     down.add_argument("instance")
     down.add_argument("--project", default="warden")
+
+    proxy = sub.add_parser(
+        "proxy",
+        help="run the host-side CONNECT/HTTP allowlist proxy in the foreground "
+             "(`warden up` starts one automatically if none is listening)",
+    )
+    proxy.add_argument("--allowlist-file", type=Path, default=DEFAULT_ALLOWLIST_FILE)
+    proxy.add_argument("--bind", default=profiles.BRIDGE_GATEWAY)
+    proxy.add_argument("--port", type=int, default=profiles.PROXY_PORT)
 
     restore = sub.add_parser(
         "restore",
@@ -81,14 +95,17 @@ def _up(args: argparse.Namespace) -> int:
         client,
         audit_installer=RealAuditRuleInstaller(),
         event_source_factory=lambda inst: RealEventSource(inst),
-        proxy_controller=RealProxyAllowlistController(args.allowlist_file),
+        proxy_controller=RealProxyAllowlistController(
+            args.allowlist_file, bind=profiles.BRIDGE_GATEWAY, port=profiles.PROXY_PORT
+        ),
+        pool=args.pool,
     )
     try:
         result = app.up(cfg)
     except IncusNotFoundError as exc:
         print(f"NEEDS-HUMAN: {exc}", file=sys.stderr)
         return 2
-    except IncusCommandError as exc:
+    except (IncusCommandError, ProvisioningError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
@@ -100,13 +117,23 @@ def _up(args: argparse.Namespace) -> int:
 
 def _down(args: argparse.Namespace) -> int:
     client = RealIncusClient()
-    app = WardenApp(client)
+    # The audit installer is wired here too: `down` must take the
+    # instance's audit rule with it, or the next instance to be allocated
+    # that uid range gets captured under a dead instance's key.
+    app = WardenApp(client, audit_installer=RealAuditRuleInstaller())
     try:
         removed = app.down(args.instance, args.project)
     except IncusNotFoundError as exc:
         print(f"NEEDS-HUMAN: {exc}", file=sys.stderr)
         return 2
     print(f"down: {args.instance} removed={removed}")
+    return 0
+
+
+def _proxy(args: argparse.Namespace) -> int:
+    args.allowlist_file.parent.mkdir(parents=True, exist_ok=True)
+    print(f"proxy: serving {args.allowlist_file} on {args.bind}:{args.port}", flush=True)
+    run_forever(args.allowlist_file, args.bind, args.port)
     return 0
 
 
@@ -123,6 +150,9 @@ def _restore(args: argparse.Namespace) -> int:
     except IncusNotFoundError as exc:
         print(f"NEEDS-HUMAN: {exc}", file=sys.stderr)
         return 2
+    except (IncusCommandError, ProvisioningError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     if cfg.spec.auditd_wired and event is None:
         print("error: auditd_wired but no capture event returned", file=sys.stderr)
         return 1
@@ -142,6 +172,8 @@ def main(argv: list[str] | None = None) -> int:
         return _down(args)
     if args.command == "restore":
         return _restore(args)
+    if args.command == "proxy":
+        return _proxy(args)
     parser.error("unknown command")
     return 2  # unreachable — parser.error exits
 
