@@ -249,6 +249,42 @@ so a CONNECT-only proxy cannot provision a container at all. Absolute-form HTTP 
 allowlisted on the same hostname as CONNECT, so one list governs both, and the https path is
 still never intercepted.
 
+## D21 — every `incus` invocation is bounded, and a hang raises rather than returns
+
+Found while re-running the acceptance suite for reproducibility: an `incus launch` client sat
+for 25 minutes while the daemon had **already created and started the instance**. The client
+simply never stopped waiting for its response. Nothing in `warden up` could notice, because a
+subprocess with no timeout has no failure mode — only an absence of progress. The environment
+was healthy throughout; the same launch worked before and after.
+
+Two calls here worth stating.
+
+**The bounds are per-operation, not global.** A metadata read that takes a minute is broken; an
+`apt-get install` through the allowlist proxy legitimately takes several. A single bound would
+have to be sized for the slowest operation, which leaves the fast ones effectively unbounded —
+the exact hang this is meant to catch. So: 60s for metadata, 600s for lifecycle, 900s for
+launch (image download), 1800s for in-guest exec. Deliberately generous: this is a
+stuck-forever backstop, not a latency SLO, and failing a slow-but-working run is the more
+expensive mistake.
+
+**A timeout raises; it never returns a non-zero result.** The existence checks
+(`project_exists` and friends) read `.returncode`, so a returned timeout would quietly become
+"doesn't exist" and send warden off to recreate something that already exists. That is this
+build's recurring failure shape yet again, and it would have been introduced *by the fix for
+it*. `IncusTimeoutError` subclasses `IncusCommandError` so every existing handler — `warden
+up`'s error path, `_wait_ready`'s retry loop — treats a hang as the failure it is, with no new
+call sites.
+
+The error message is careful about what it claims. Killing the `incus` client does **not**
+cancel the operation on the daemon — the run that motivated this bound had the instance
+created, started and running while its client hung. So a timeout means "we stopped waiting",
+not "it did not happen", and the message says to re-run to converge rather than assuming
+otherwise. `up` is idempotent and re-derives rather than caching, so that re-run is safe.
+
+Related: `_wait_ready`'s readiness probe now passes its own short bound. Inheriting the exec
+default would let one `/bin/true` block for half an hour and make the function's 60s deadline
+decorative — a bound that a caller can outlive is not a bound.
+
 ## D20 — `warden up` self-provisions its storage pool
 
 `up` already self-provisioned the bridge but assumed `wardenpool` existed, so it failed with

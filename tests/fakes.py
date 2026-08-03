@@ -172,6 +172,7 @@ class FakeIncusClient:
         argv: list[str],
         project: str = "default",
         env: dict[str, str] | None = None,
+        timeout: float | None = None,  # accepted for interface parity; nothing here blocks
     ) -> ExecResult:
         inst = self._require_instance(name, project)
         self.exec_calls.append((name, list(argv)))

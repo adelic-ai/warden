@@ -132,6 +132,12 @@ class WardenApp:
             )
         return result
 
+    # A readiness probe must not be able to outlive the loop that polls it.
+    # `exec`'s own bound is sized for `apt-get install`, so inheriting it here
+    # would let one `/bin/true` block far past this function's deadline and
+    # make the deadline decorative.
+    PROBE_TIMEOUT = 15.0
+
     def _wait_ready(self, cfg: WardenConfig, timeout: float = 60.0) -> None:
         """Block until the instance can run a command.
 
@@ -142,7 +148,9 @@ class WardenApp:
         last = ""
         while time.monotonic() < deadline:
             try:
-                if self.client.exec(cfg.instance, ["/bin/true"], project=cfg.project).ok:
+                if self.client.exec(
+                    cfg.instance, ["/bin/true"], project=cfg.project, timeout=self.PROBE_TIMEOUT
+                ).ok:
                     return
             except IncusCommandError as exc:  # pragma: no cover - timing dependent
                 last = str(exc)

@@ -13,6 +13,22 @@ import subprocess
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
+# Every `incus` invocation is bounded. The validation run caught the reason:
+# an `incus launch` client sat for 25 minutes while the daemon had in fact
+# already created and started the instance — the client simply never stopped
+# waiting for its response. Nothing in `warden up` could notice, because a
+# subprocess with no timeout has no failure mode, only an absence of progress.
+#
+# The values differ per operation because the honest bound does: a metadata
+# read that takes a minute is broken, while `apt-get install` through the
+# allowlist proxy legitimately takes several. They are deliberately generous —
+# this is a stuck-forever backstop, not a latency SLO. Anything tighter would
+# start failing slow-but-working runs, which is the more expensive mistake.
+QUERY_TIMEOUT = 60.0       # show/get/set/list/acl — metadata, should be instant
+LIFECYCLE_TIMEOUT = 600.0  # snapshot, restore, delete, file push
+LAUNCH_TIMEOUT = 900.0     # may include an image download
+EXEC_TIMEOUT = 1800.0      # apt-get / git clone inside the guest, via the proxy
+
 
 class IncusCommandError(RuntimeError):
     """An `incus` invocation failed for a reason other than "doesn't exist"."""
@@ -22,6 +38,35 @@ class IncusCommandError(RuntimeError):
         self.returncode = returncode
         self.stderr = stderr
         super().__init__(f"`{' '.join(argv)}` exited {returncode}: {stderr.strip()}")
+
+
+class IncusTimeoutError(IncusCommandError):
+    """An `incus` invocation was still running when its bound expired.
+
+    Deliberately a subclass of `IncusCommandError` so that every existing
+    handler — `warden up`'s error path, `_wait_ready`'s retry loop — treats a
+    hang as the failure it is, with no new call sites needed.
+
+    **A timeout means "we stopped waiting", not "it did not happen."** Killing
+    the `incus` client does not cancel the operation on the daemon: the run
+    that motivated this bound had the instance created, started and running
+    while its client hung. So this must never be swallowed into a False by an
+    existence check — a timed-out `project_exists` reporting "absent" would
+    send warden off to recreate something that already exists, which is the
+    confident-wrong-answer shape this build keeps having to dig out.
+
+    Recovery is a re-run: `up` is idempotent and re-derives rather than
+    assuming, so it converges on whatever the daemon actually did.
+    """
+
+    def __init__(self, argv: list[str], timeout: float):
+        self.timeout = timeout
+        super().__init__(
+            argv,
+            124,  # conventional shell timeout status
+            f"timed out after {timeout:g}s with no response. The operation may still have "
+            f"completed on the daemon — re-run to converge rather than assuming it did not.",
+        )
 
 
 class IncusNotFoundError(RuntimeError):
@@ -92,6 +137,7 @@ class IncusClient(Protocol):
         argv: list[str],
         project: str = "default",
         env: dict[str, str] | None = None,
+        timeout: float = EXEC_TIMEOUT,
     ) -> ExecResult: ...
     def file_push(
         self, name: str, content: bytes, remote_path: str, project: str = "default"
@@ -108,18 +154,36 @@ class RealIncusClient:
     def __init__(self, binary: str = "incus"):
         self._bin = binary
 
-    def _run(self, args: list[str], *, input_bytes: bytes | None = None) -> subprocess.CompletedProcess:
+    def _run(
+        self,
+        args: list[str],
+        *,
+        input_bytes: bytes | None = None,
+        timeout: float = QUERY_TIMEOUT,
+    ) -> subprocess.CompletedProcess:
         argv = [self._bin, *args]
         try:
             return subprocess.run(
                 argv, capture_output=True, input=input_bytes,
-                text=input_bytes is None,
+                text=input_bytes is None, timeout=timeout,
             )
         except FileNotFoundError:
             raise IncusNotFoundError(self._bin) from None
+        except subprocess.TimeoutExpired:
+            # subprocess.run has already killed and reaped the client. Raising
+            # (rather than returning a non-zero result) is load-bearing: the
+            # existence checks below read `.returncode`, so a returned timeout
+            # would quietly become "doesn't exist". See IncusTimeoutError.
+            raise IncusTimeoutError(argv, timeout) from None
 
-    def _run_ok(self, args: list[str], *, input_bytes: bytes | None = None) -> subprocess.CompletedProcess:
-        proc = self._run(args, input_bytes=input_bytes)
+    def _run_ok(
+        self,
+        args: list[str],
+        *,
+        input_bytes: bytes | None = None,
+        timeout: float = QUERY_TIMEOUT,
+    ) -> subprocess.CompletedProcess:
+        proc = self._run(args, input_bytes=input_bytes, timeout=timeout)
         if proc.returncode != 0:
             stderr = proc.stderr if isinstance(proc.stderr, str) else proc.stderr.decode(errors="replace")
             raise IncusCommandError([self._bin, *args], proc.returncode, stderr)
@@ -153,7 +217,7 @@ class RealIncusClient:
             self._run_ok(["project", "set", name, key, value])
 
     def storage_pool_create(self, name: str, driver: str = "btrfs") -> None:
-        self._run_ok(["storage", "create", name, driver])
+        self._run_ok(["storage", "create", name, driver], timeout=LIFECYCLE_TIMEOUT)
 
     # -- convergence ---------------------------------------------------------
     def project_set(self, name: str, key: str, value: str) -> None:
@@ -214,11 +278,13 @@ class RealIncusClient:
         self._run_ok(args)
 
     def launch(self, image: str, name: str, project: str, profile: str) -> None:
+        # The long bound is the image download; the bound existing at all is
+        # the hung-client hang this whole mechanism exists for.
         self._run_ok([
             "launch", image, name,
             "--project", project,
             "--profile", profile,
-        ])
+        ], timeout=LAUNCH_TIMEOUT)
 
     # -- instance ops -----------------------------------------------------
     def config_get(self, name: str, key: str, project: str = "default") -> str:
@@ -234,12 +300,21 @@ class RealIncusClient:
         argv: list[str],
         project: str = "default",
         env: dict[str, str] | None = None,
+        timeout: float = EXEC_TIMEOUT,
     ) -> ExecResult:
+        """Run a command in the guest. `timeout` bounds the whole call.
+
+        The default is long because provisioning genuinely is: `apt-get
+        install` through the allowlist proxy took minutes on the validation
+        host. Callers polling for a condition should pass something far
+        shorter — a probe inside a retry loop must not be able to outlive the
+        loop's own deadline.
+        """
         cmd = ["exec", name, "--project", project]
         for k, v in (env or {}).items():
             cmd += ["--env", f"{k}={v}"]
         cmd += ["--", *argv]
-        proc = self._run(cmd)
+        proc = self._run(cmd, timeout=timeout)
         return ExecResult(proc.returncode, proc.stdout, proc.stderr)
 
     def file_push(
@@ -248,17 +323,26 @@ class RealIncusClient:
         self._run_ok(
             ["file", "push", "-", f"{name}/{remote_path}", "--project", project],
             input_bytes=content,
+            timeout=LIFECYCLE_TIMEOUT,
         )
 
     def snapshot(self, name: str, snapshot: str, project: str = "default") -> None:
-        self._run_ok(["snapshot", "create", name, snapshot, "--project", project])
+        self._run_ok(
+            ["snapshot", "create", name, snapshot, "--project", project],
+            timeout=LIFECYCLE_TIMEOUT,
+        )
 
     def restore(self, name: str, snapshot: str, project: str = "default") -> None:
-        self._run_ok(["snapshot", "restore", name, snapshot, "--project", project])
+        # A restore stops and restarts the container, so it is a lifecycle
+        # operation's worth of work, not a metadata write.
+        self._run_ok(
+            ["snapshot", "restore", name, snapshot, "--project", project],
+            timeout=LIFECYCLE_TIMEOUT,
+        )
 
     def delete(self, name: str, project: str = "default") -> None:
-        self._run(["stop", name, "--project", project, "--force"])
-        self._run_ok(["delete", name, "--project", project])
+        self._run(["stop", name, "--project", project, "--force"], timeout=LIFECYCLE_TIMEOUT)
+        self._run_ok(["delete", name, "--project", project], timeout=LIFECYCLE_TIMEOUT)
 
     def list_instances(self, project: str) -> list[str]:
         proc = self._run_ok(["list", "--project", project, "--format", "json"])
