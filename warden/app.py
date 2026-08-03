@@ -10,18 +10,33 @@ proxy, what permission mode it configures) all comes from `cfg.spec`.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Callable, Optional
 
+from warden import egress, profiles
 from warden.auditd import AuditEvent, AuditRuleInstaller, EventSource, prove_capture
 from warden.config import WardenConfig, resolve_llm_auth
 from warden.idmap import Idmap, assert_unprivileged, derive_idmap
-from warden.incus import IncusClient
+from warden.incus import ExecResult, IncusClient, IncusCommandError
 from warden.proxy import ProxyAllowlistController
-from warden import profiles
 from warden.standing_rules import render_standing_rules, standing_rules_filename
 
 CLEAN_SNAPSHOT = "clean"
+REPO_PATH = "/root/repo"
+# Restore has to rewrite volatile.idmap.*, which `restricted=true` blocks by
+# implying restricted.containers.lowlevel=block. Opened for the duration of
+# one restore and closed again — never left on. See DECISIONS.md "D16".
+LOWLEVEL_KEY = "restricted.containers.lowlevel"
+
+
+class ProvisioningError(RuntimeError):
+    """A command run inside the instance failed.
+
+    Exists because the first real-Incus run's `git clone` failed silently:
+    the image has no `git`, `exec` returned rc 127, and nothing looked at
+    the result. The test then reported "no /root/repo/.git" with no clue why.
+    """
 
 
 @dataclass
@@ -39,23 +54,140 @@ class WardenApp:
         audit_installer: Optional[AuditRuleInstaller] = None,
         event_source_factory: Optional[Callable[[str], EventSource]] = None,
         proxy_controller: Optional[ProxyAllowlistController] = None,
+        pool: str = profiles.STORAGE_POOL,
     ):
         self.client = client
         self.audit_installer = audit_installer
         self.event_source_factory = event_source_factory
         self.proxy_controller = proxy_controller
+        self.pool = pool
 
     # -- shared substrate (idempotent) -------------------------------------
     def ensure_substrate(self, cfg: WardenConfig) -> None:
+        # The pool is no longer assumed to exist: `up` self-provisions the
+        # bridge, so assuming a pool that only install-incus-nested.sh
+        # creates made `warden up` fail with "Storage pool not found" on any
+        # other host.
+        if not self.client.storage_pool_exists(self.pool):
+            self.client.storage_pool_create(self.pool, profiles.STORAGE_DRIVER)
+
         if not self.client.project_exists(cfg.project):
             self.client.project_create(cfg.project, profiles.project_config())
+        else:
+            # Converge: a project created by an older warden is missing
+            # restricted.snapshots, and re-running should fix it rather
+            # than leave the operator to notice at snapshot time.
+            for key, value in profiles.project_config().items():
+                self.client.project_set(cfg.project, key, value)
+
         if not self.client.network_exists(profiles.BRIDGE_NAME):
             self.client.network_create(profiles.BRIDGE_NAME, profiles.network_config())
-        profile_spec = profiles.build_profile(cfg.spec.name, mem=cfg.mem, cpu=cfg.cpu)
+
+        self._ensure_egress()
+
+        profile_spec = profiles.build_profile(cfg.spec.name, mem=cfg.mem, cpu=cfg.cpu, pool=self.pool)
         if not self.client.profile_exists(profile_spec.name, cfg.project):
             self.client.profile_create(
                 profile_spec.name, cfg.project, profile_spec.config, profile_spec.devices
             )
+        else:
+            # An existing profile predating the ACL would leave its
+            # instances with no egress policy at all — fail open, silently.
+            self.client.profile_device_set(
+                profile_spec.name, cfg.project, "eth0", "security.acls", egress.ACL_NAME
+            )
+
+    def _ensure_egress(self) -> None:
+        """Install the ACL, put the bridge on default-drop, and make sure
+        the allowlist proxy is actually listening (§1).
+
+        The first real run enforced none of this: `egress.py` generated an
+        nftables ruleset that nothing loaded, and the proxy was a file
+        nobody read. `example.com` and the LAN gateway were both reachable.
+        """
+        document = egress.build_acl_document(profiles.BRIDGE_GATEWAY, profiles.PROXY_PORT)
+        egress.assert_enforceable(document, profiles.BRIDGE_GATEWAY, profiles.PROXY_PORT)
+        if self.client.network_acl_get(egress.ACL_NAME) != document:
+            self.client.network_acl_put(egress.ACL_NAME, document)
+
+        # Scoped to warden's own bridge — never a host-wide policy, so an
+        # unrelated bridge on this host is unaffected.
+        self.client.network_set(
+            profiles.BRIDGE_NAME, "security.acls.default.egress.action", "drop"
+        )
+        self.client.network_set(
+            profiles.BRIDGE_NAME, "security.acls.default.ingress.action", "drop"
+        )
+
+        if self.proxy_controller is not None:
+            self.proxy_controller.ensure_running()
+
+    # -- provisioning helpers ------------------------------------------------
+    def _exec_ok(self, cfg: WardenConfig, argv: list[str], what: str) -> ExecResult:
+        result = self.client.exec(cfg.instance, argv, project=cfg.project)
+        if not result.ok:
+            raise ProvisioningError(
+                f"{cfg.instance}: {what} failed (rc={result.returncode}): "
+                f"{(result.stderr or result.stdout).strip()}"
+            )
+        return result
+
+    def _wait_ready(self, cfg: WardenConfig, timeout: float = 60.0) -> None:
+        """Block until the instance can run a command.
+
+        A snapshot restore stops and restarts the container; execing into
+        it immediately afterwards races the boot and fails in a way that
+        looks like a capture failure."""
+        deadline = time.monotonic() + timeout
+        last = ""
+        while time.monotonic() < deadline:
+            try:
+                if self.client.exec(cfg.instance, ["/bin/true"], project=cfg.project).ok:
+                    return
+            except IncusCommandError as exc:  # pragma: no cover - timing dependent
+                last = str(exc)
+            time.sleep(1.0)
+        raise ProvisioningError(f"{cfg.instance}: not ready within {timeout}s {last}")
+
+    def _set_proxy_env(self, cfg: WardenConfig) -> None:
+        """Point the guest at the host-side proxy.
+
+        Set as instance `environment.*` keys rather than a shell profile so
+        that every `incus exec` — including the acceptance tests' bare
+        `curl` — inherits it. Egress is default-drop, so a process that
+        ignores these simply has no network, which is the intended
+        direction of failure."""
+        url = f"http://{profiles.BRIDGE_GATEWAY}:{profiles.PROXY_PORT}"
+        for key in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
+            self.client.config_set(cfg.instance, f"environment.{key}", url, project=cfg.project)
+        # The bridge and loopback must not be proxied, or in-guest traffic
+        # would loop back out through the proxy and be denied.
+        self.client.config_set(
+            cfg.instance, "environment.no_proxy", f"127.0.0.1,localhost,{profiles.BRIDGE_GATEWAY}",
+            project=cfg.project,
+        )
+
+    def _provision(self, cfg: WardenConfig) -> None:
+        """Install what the flavor needs, through the proxy.
+
+        `images:debian/12` is minimal: it has curl but **no git**. That is
+        the whole of finding 6 — the clone never ran."""
+        self._exec_ok(cfg, ["sh", "-c", "apt-get update -qq"], "apt-get update")
+        self._exec_ok(
+            cfg,
+            ["sh", "-c", "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends git ca-certificates"],
+            "apt-get install git",
+        )
+
+    def _clone_repo(self, cfg: WardenConfig) -> None:
+        assert cfg.repo_url is not None
+        self._exec_ok(
+            cfg,
+            ["sh", "-c", f"test -d {REPO_PATH}/.git || git clone {cfg.repo_url} {REPO_PATH}"],
+            f"git clone {cfg.repo_url}",
+        )
+        # Prove it, rather than trusting the exit code of a compound command.
+        self._exec_ok(cfg, ["test", "-d", f"{REPO_PATH}/.git"], f"{REPO_PATH}/.git missing after clone")
 
     def _wire_auditd(self, cfg: WardenConfig, idmap: Idmap) -> AuditEvent:
         if self.audit_installer is None or self.event_source_factory is None:
@@ -76,9 +208,25 @@ class WardenApp:
         if created:
             profile_name = profiles.build_profile(cfg.spec.name).name
             self.client.launch(profiles.IMAGE, cfg.instance, cfg.project, profile_name)
-            if self.proxy_controller is not None:
-                # wide, one-time provisioning allowlist for setup
-                self.proxy_controller.set_allowlist(cfg.spec.provisioning_allowlist)
+
+        # Stale rules from instances that no longer exist would shadow this
+        # one if they overlap its uid range — see auditd.prune / D14.
+        if self.audit_installer is not None:
+            self.audit_installer.prune(set(self.client.list_instances(cfg.project)))
+
+        self._set_proxy_env(cfg)
+        self._wait_ready(cfg)
+
+        needs_provisioning = created or (
+            cfg.spec.repo_git
+            and cfg.repo_url is not None
+            and not self.client.exec(
+                cfg.instance, ["test", "-d", f"{REPO_PATH}/.git"], project=cfg.project
+            ).ok
+        )
+        if needs_provisioning and self.proxy_controller is not None:
+            # wide, one-time provisioning allowlist for setup
+            self.proxy_controller.set_allowlist(cfg.spec.provisioning_allowlist)
 
         idmap = derive_idmap(self.client, cfg.instance, project=cfg.project)  # never cached
         assert_unprivileged(idmap)
@@ -87,8 +235,10 @@ class WardenApp:
         filename = standing_rules_filename(cfg.llm)
         self.client.file_push(cfg.instance, rules_text.encode(), f"/root/{filename}", project=cfg.project)
 
+        if needs_provisioning:
+            self._provision(cfg)
         if cfg.spec.repo_git and cfg.repo_url:
-            self.client.exec(cfg.instance, ["git", "clone", cfg.repo_url, "/root/repo"], project=cfg.project)
+            self._clone_repo(cfg)
 
         capture_proof = None
         if cfg.spec.auditd_wired:
@@ -112,8 +262,21 @@ class WardenApp:
     ) -> Optional[AuditEvent]:
         """§1's other load-bearing bit: restore reallocates the idmap, so
         the audit rule must be re-derived and re-proven — never trust
-        `auditctl -l` for this."""
-        self.client.restore(cfg.instance, snapshot, project=cfg.project)
+        `auditctl -l` for this.
+
+        A restricted project blocks the idmap rewrite the restore depends
+        on, so the low-level permission is opened for exactly this one
+        operation and closed again in `finally` — including on failure.
+        Leaving it on would also permit `raw.lxc`/`raw.idmap`, which can
+        weaken confinement; that is not a trade worth making permanent.
+        """
+        self.client.project_set(cfg.project, LOWLEVEL_KEY, "allow")
+        try:
+            self.client.restore(cfg.instance, snapshot, project=cfg.project)
+        finally:
+            self.client.project_unset(cfg.project, LOWLEVEL_KEY)
+
+        self._wait_ready(cfg)
         idmap = derive_idmap(self.client, cfg.instance, project=cfg.project)  # fresh, post-restore
         assert_unprivileged(idmap)
         if not cfg.spec.auditd_wired:
@@ -123,8 +286,14 @@ class WardenApp:
     # -- down ---------------------------------------------------------------
     def down(self, instance: str, project: str) -> bool:
         """Removes only the instance. The shared substrate (project,
-        profile, network, proxy allowlist) is left alone — see
-        DECISIONS.md."""
+        profile, network, ACL, proxy allowlist) is left alone — see
+        DECISIONS.md.
+
+        The instance's audit rule is *not* shared substrate: leaving it
+        behind is what let a dead instance's rule capture a live one's
+        execs under the wrong key."""
+        if self.audit_installer is not None:
+            self.audit_installer.uninstall(instance)
         if not self.client.instance_exists(instance, project):
             return False
         self.client.delete(instance, project=project)

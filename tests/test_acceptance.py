@@ -93,10 +93,17 @@ def test_2_builder_invariants():
 
     result = app.up(cfg)
 
-    # can git clone a public repo
-    clone_calls = [argv for (inst, argv) in client.exec_calls if inst == "cap-build" and argv[:2] == ["git", "clone"]]
+    # can git clone a public repo. The image has no git, so provisioning
+    # has to install it first — the first real-Incus run skipped that and
+    # the clone failed silently (finding 6).
+    execs = [" ".join(argv) for (inst, argv) in client.exec_calls if inst == "cap-build"]
+    assert any("apt-get install" in e and "git" in e for e in execs), \
+        "expected git to be installed before cloning — images:debian/12 has none"
+    clone_calls = [e for e in execs if "git clone" in e]
     assert clone_calls, "expected a git clone exec against the instance"
-    assert clone_calls[0][2] == cfg.repo_url
+    assert cfg.repo_url in clone_calls[0]
+    # and the result is verified, not assumed
+    assert any(argv == ["test", "-d", "/root/repo/.git"] for (_, argv) in client.exec_calls)
 
     # hands-off: skip-permissions
     assert cfg.spec.permission_mode == "skip-permissions"

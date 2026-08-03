@@ -21,6 +21,8 @@ from dataclasses import dataclass, field
 from warden.auditd import AuditEvent, extract_marker
 from warden.incus import ExecResult, IncusCommandError
 
+_REPO_PATH = "/root/repo"
+
 
 @dataclass
 class _Instance:
@@ -31,6 +33,9 @@ class _Instance:
     config: dict[str, str] = field(default_factory=dict)
     snapshots: set[str] = field(default_factory=set)
     running: bool = True
+    # Just enough filesystem to model "did the clone actually land?" —
+    # the real bug was `git clone` failing silently in an image with no git.
+    paths: set[str] = field(default_factory=set)
 
 
 class FakeIncusClient:
@@ -41,8 +46,11 @@ class FakeIncusClient:
         self.profiles: dict[tuple[str, str], dict] = {}
         self.networks: dict[str, dict[str, str]] = {}
         self.instances: dict[tuple[str, str], _Instance] = {}
+        self.storage_pools: dict[str, str] = {}
+        self.network_acls: dict[str, dict] = {}
         self.audit_log: list[AuditEvent] = []
         self.exec_calls: list[tuple[str, list[str]]] = []
+        self.exec_failures: dict[str, ExecResult] = {}
         self._serial = 0
 
     # -- internal ---------------------------------------------------------
@@ -79,6 +87,45 @@ class FakeIncusClient:
     def snapshot_exists(self, name: str, snapshot: str, project: str) -> bool:
         key = (project, name)
         return key in self.instances and snapshot in self.instances[key].snapshots
+
+    def storage_pool_exists(self, name: str) -> bool:
+        return name in self.storage_pools
+
+    def storage_pool_create(self, name: str, driver: str = "btrfs") -> None:
+        if name in self.storage_pools:
+            raise IncusCommandError(["storage", "create", name], 1, "already exists")
+        self.storage_pools[name] = driver
+
+    # -- convergence ---------------------------------------------------------
+    def project_set(self, name: str, key: str, value: str) -> None:
+        if name not in self.projects:
+            raise IncusCommandError(["project", "set", name], 1, "not found")
+        self.projects[name][key] = value
+
+    def project_unset(self, name: str, key: str) -> None:
+        if name not in self.projects:
+            raise IncusCommandError(["project", "unset", name], 1, "not found")
+        self.projects[name].pop(key, None)
+
+    def network_set(self, name: str, key: str, value: str) -> None:
+        if name not in self.networks:
+            raise IncusCommandError(["network", "set", name], 1, "not found")
+        self.networks[name][key] = value
+
+    def profile_device_set(
+        self, profile: str, project: str, device: str, key: str, value: str
+    ) -> None:
+        entry = self.profiles.get((project, profile))
+        if entry is None:
+            raise IncusCommandError(["profile", "device", "set", profile], 1, "not found")
+        entry["devices"].setdefault(device, {})[key] = value
+
+    # -- network ACLs ---------------------------------------------------------
+    def network_acl_get(self, name: str) -> dict | None:
+        return self.network_acls.get(name)
+
+    def network_acl_put(self, name: str, document: dict) -> None:
+        self.network_acls[name] = json.loads(json.dumps(document))
 
     # -- create ---------------------------------------------------------------
     def project_create(self, name: str, config: dict[str, str]) -> None:
@@ -130,6 +177,17 @@ class FakeIncusClient:
         self.exec_calls.append((name, list(argv)))
         if not inst.running:
             return ExecResult(1, "", f"{name} is not running")
+
+        joined = " ".join(argv)
+        for needle, failure in self.exec_failures.items():
+            if needle in joined:
+                return failure
+        # `test -d <path>` is the shape warden uses to decide whether the
+        # clone landed, so it has to answer honestly.
+        if argv[:2] == ["test", "-d"]:
+            return ExecResult(0 if argv[2] in inst.paths else 1, "", "")
+        if "git clone" in joined:
+            inst.paths.add(f"{_REPO_PATH}/.git")
 
         idmap = json.loads(inst.config["volatile.idmap.current"])
         uid_entry = next(e for e in idmap if e["Isuid"] and e["Nsid"] == 0)
@@ -195,9 +253,19 @@ class FakeAuditRuleInstaller:
 
     def __init__(self):
         self.installed: dict[str, "IdRange"] = {}
+        self.pruned: list[set[str]] = []
 
     def install(self, instance: str, uid_range) -> None:
         self.installed[instance] = uid_range
+
+    def uninstall(self, instance: str) -> None:
+        self.installed.pop(instance, None)
+
+    def prune(self, live_instances: set[str]) -> None:
+        self.pruned.append(set(live_instances))
+        for instance in list(self.installed):
+            if instance not in live_instances:
+                del self.installed[instance]
 
 
 class FakeProxyAllowlistController:
@@ -207,7 +275,12 @@ class FakeProxyAllowlistController:
     def __init__(self):
         self.current: tuple[str, ...] = ()
         self.history: list[tuple[str, ...]] = []
+        self.ensure_running_calls = 0
 
     def set_allowlist(self, domains: tuple[str, ...]) -> None:
         self.current = tuple(domains)
         self.history.append(self.current)
+
+    def ensure_running(self) -> bool:
+        self.ensure_running_calls += 1
+        return False
