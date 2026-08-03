@@ -26,8 +26,6 @@ import json
 import tarfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
-
 from warden.config import WardenConfig
 from warden.incus import IncusClient
 from warden.report import (

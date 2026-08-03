@@ -11,8 +11,6 @@ import json
 import tarfile
 from pathlib import Path
 
-import pytest
-
 from tests.fakes import FakeIncusClient
 from warden.config import build_config
 from warden.export import (

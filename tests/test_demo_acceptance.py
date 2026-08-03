@@ -55,7 +55,7 @@ from warden.report import (
     VERDICTS_NAME,
     Reporter,
 )
-from warden.workload import MANIFEST_NAME, RunManifest, WorkloadRunner, run_dir_for
+from warden.workload import MANIFEST_NAME, WorkloadRunner, run_dir_for
 
 PROJECT = "wardendemo"  # never `warden` — the demo runs in its own isolated project
 INSTANCE = "wd-demo"
