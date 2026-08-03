@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>warden — findings</title>
+<meta name="description" content="What the build actually established: verdicts, integrity findings, and honest limits.">
+<link rel="stylesheet" href="warden.css">
+</head>
+<body>
+<header class="bar">
+  <div class="wrap">
+    <span class="brand"><span class="dot"></span>warden</span>
+    <nav class="nav" aria-label="Primary">
+      <a href="index.html">Overview</a>
+      <a href="findings.html" aria-current="page">Findings</a>
+      <a href="design.html">Design</a>
+    </nav>
+    <button class="tgl" id="tgl" type="button" aria-label="Toggle color theme">theme</button>
+  </div>
+</header>
+
+<main>
+  <section class="wrap">
+    <p class="eyebrow">Findings · Gemini capsule, benign run · 2026-08</p>
+    <h1>What the build actually established.</h1>
+    <p class="lede">No claim here is asserted — each is measured or reproduced. The verdict vocabulary is the detector's own: <span class="mono">authorized / gap / confirmed</span>. This page is also the shape a real detection report takes.</p>
+  </section>
+
+  <section class="wrap">
+    <div class="grid cols-3">
+      <div class="stat" data-tone="ok"><div class="k">CONFIRMED-on-benign</div><div class="v">34 → 0</div><div class="s">baseline (Claude scope config, fails open) → tuned (Gemini scope). Structural, not threshold-tuned.</div></div>
+      <div class="stat"><div class="k">In scope / explained</div><div class="v">15 / 15</div><div class="s">of 34 agent-uid execs; the other 19 are login/systemd noise, correctly out of scope — not allowlisted.</div></div>
+      <div class="stat" data-tone="crit"><div class="k">Correlation validated</div><div class="v">no</div><div class="s"><span class="mono">matched = 0</span> — the tool ran in-process and never exec'd. Recall is unproven.</div></div>
+    </div>
+  </section>
+
+  <section class="wrap">
+    <div class="section-head">
+      <p class="eyebrow">Integrity findings · caught during the build</p>
+      <h2>Three of these are silent-failure bugs that made a broken system look correct.</h2>
+    </div>
+    <div class="tablewrap">
+      <table>
+        <thead>
+          <tr><th>Finding</th><th>Plane</th><th>Verdict</th><th>Status</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Snapshot restore reallocated the container idmap; the frozen audit rule filtered a dead range — <strong>ground-truth plane silently blind while <span class="mono">auditctl -l</span> looked correct.</strong> Exercising reversibility (I6) destroyed ground truth (I5).</td>
+            <td class="mono">auditd</td>
+            <td><span class="pill pill--crit">confirmed</span></td>
+            <td>Fixed — rule re-derived from live idmap; durable fix (derive-at-load) filed for the capsule.</td>
+          </tr>
+          <tr>
+            <td>The measurement harness printed "suggested allowlist additions: <span class="mono">curl, git</span>" — pasting it would have silenced <span class="mono">curl</span>, the exec the detector most exists to catch. <strong>A tool built to enforce the discipline generated the temptation it warns against.</strong></td>
+            <td class="mono">harness</td>
+            <td><span class="pill pill--gap">gap</span></td>
+            <td>Fixed — relabeled as data, not a recommendation; test fails if the allowlist is widened to flatten the number.</td>
+          </tr>
+          <tr>
+            <td><span class="mono">ausearch -i</span> output dialect differs by host (interpolated vs appended fields, local-time header); the parser discarded an <em>intact</em> 38-exec capture and reported "no execs." <strong>A good capture read as empty.</strong></td>
+            <td class="mono">auditd</td>
+            <td><span class="pill pill--crit">confirmed</span></td>
+            <td>Fixed — both dialects parsed; unreadable records now recorded as skip-reasons, never as emptiness.</td>
+          </tr>
+          <tr>
+            <td>Failed <span class="mono">PATH</span>-probe execve attempts double-counted as CONFIRMED and nearly reclassified <span class="mono">curl</span> as the runtime's <span class="mono">node</span> — which would have made a real finding disappear.</td>
+            <td class="mono">reconciler</td>
+            <td><span class="pill pill--gap">gap</span></td>
+            <td>Fixed — failed execs reported separately (they ran nothing) and no longer clobber a successful exec's identity.</td>
+          </tr>
+          <tr>
+            <td>A startup <span class="mono">git rev-parse --show-toplevel</span> ran <em>before</em> any tool call, so nothing could authorize it. Judged, not swept: added as an exact-argv allowlist entry, so <span class="mono">git push</span>/<span class="mono">commit</span> stay visible.</td>
+            <td class="mono">self-report ⇄ auditd</td>
+            <td><span class="pill pill--ok">authorized</span></td>
+            <td>Resolved by judgment (canon's coverage rule), not by widening a name allowlist.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="wrap">
+    <div class="section-head">
+      <p class="eyebrow">Not yet proven</p>
+      <h2>Stated so no downstream layer certifies past them.</h2>
+    </div>
+    <div class="grid cols-2">
+      <div class="note">
+        <p class="eyebrow">Recall / correlation</p>
+        <p style="margin-bottom:0">The 0 rests entirely on scope + runtime-internal classification. The tool_call↔exec matching path was never exercised — the benign run used <span class="mono">list_directory</span>, which runs in-process and never execs. A <span class="mono">run_shell_command</span> run is required before recall can be called validated.</p>
+      </div>
+      <div class="note">
+        <p class="eyebrow">Self-report fidelity</p>
+        <p style="margin-bottom:0">Gemini logs tool calls <strong>name-only</strong> unless <span class="mono">logPrompts</span> is on (<span class="mono">function_args</span> exists but is gated behind prompt-bearing logging). Reconciliation authorizes on timestamp, so this doesn't break detection — but a command-level "claimed vs actual" check can't be built on the default config.</p>
+      </div>
+    </div>
+    <p class="muted" style="margin-top:1.5rem;font-size:0.9rem">One benign run, one host. Nothing here is actuarial-grade yet — these are reproductions and single-run measurements, reported as such.</p>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">warden · findings · <a href="index.html">overview</a> · <a href="design.html">design</a></div>
+</footer>
+
+<script>
+(function () {
+  var root = document.documentElement, btn = document.getElementById("tgl"), KEY = "warden-theme";
+  try { var s = localStorage.getItem(KEY); if (s) root.setAttribute("data-theme", s); } catch (e) {}
+  function cur(){ var a = root.getAttribute("data-theme"); return a || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"); }
+  btn.addEventListener("click", function(){ var n = cur() === "dark" ? "light" : "dark"; root.setAttribute("data-theme", n); try { localStorage.setItem(KEY, n); } catch (e) {} });
+})();
+</script>
+</body>
+</html>

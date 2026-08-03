@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>warden — governed LLM workload-runner</title>
+<meta name="description" content="Run an LLM agent isolated and egress-controlled, and reconcile what it said it did against unforgeable ground truth.">
+<link rel="stylesheet" href="warden.css">
+</head>
+<body>
+<header class="bar">
+  <div class="wrap">
+    <span class="brand"><span class="dot"></span>warden</span>
+    <nav class="nav" aria-label="Primary">
+      <a href="index.html" aria-current="page">Overview</a>
+      <a href="findings.html">Findings</a>
+      <a href="design.html">Design</a>
+    </nav>
+    <button class="tgl" id="tgl" type="button" aria-label="Toggle color theme">theme</button>
+  </div>
+</header>
+
+<main>
+  <section class="wrap">
+    <p class="eyebrow">Accountable autonomy · oversight &amp; custody</p>
+    <h1>Don't trust the agent's account of itself. Reconcile it against a plane it can't forge.</h1>
+    <p class="lede">warden runs an LLM agent in an isolated, egress-controlled container and reconciles what it <em>said</em> it did — its transcript — against unforgeable ground truth: the host syscalls it actually made and the network it actually reached. That reconciliation is the product. Reading the transcript alone is trusting the thing you're supposed to be watching.</p>
+  </section>
+
+  <section class="wrap">
+    <div class="section-head">
+      <p class="eyebrow">The stack · read bottom-up</p>
+      <h2>Four layers. Each only means something over a working one below it.</h2>
+    </div>
+    <ol class="stack">
+      <li class="layer" data-base>
+        <span class="lname">Incus wizard</span>
+        <span class="lrole">Isolated, egress-controlled, audited LLM runner. The substrate everything stands on.</span>
+        <span class="ltag">substrate · step 0</span>
+      </li>
+      <li class="layer">
+        <span class="lname">agentwatch</span>
+        <span class="lrole">Two-plane reconciliation of self-report against ground truth → <span class="mono">CONFIRMED / GAP / NONE</span>.</span>
+        <span class="ltag">detection</span>
+      </li>
+      <li class="layer">
+        <span class="lname">canon</span>
+        <span class="lrole">Verdicts + chain-of-custody + a machine-checkable claim of what's covered and what isn't.</span>
+        <span class="ltag">attestation · prov</span>
+      </li>
+      <li class="layer">
+        <span class="lname">omega + ATLAS</span>
+        <span class="lrole">Coverage cartography — what we catch, and where we're silent, on the AI-threat spine.</span>
+        <span class="ltag">coverage</span>
+      </li>
+    </ol>
+    <p class="muted" style="margin-top:1rem;font-size:0.9rem">Build and validate bottom-up. The top is named for direction, not built first.</p>
+  </section>
+
+  <section class="wrap">
+    <div class="section-head">
+      <p class="eyebrow">The value ladder</p>
+      <h2>The wizard offers exactly the tier that can honestly work — derived, never claimed.</h2>
+    </div>
+    <div class="grid cols-3">
+      <div class="card">
+        <span class="pill pill--ok">Always</span>
+        <h3 style="margin-top:0.7rem">Sandbox</h3>
+        <p>Isolated container, egress lock, the LLM, its auth. "Run any LLM safely." Every install gets this.</p>
+      </div>
+      <div class="card">
+        <span class="pill pill--gap">Opt-in</span>
+        <h3 style="margin-top:0.7rem">Viewer</h3>
+        <p>The parsed-transcript timeline for any parseable LLM. Labeled <strong>viewing, not detection</strong> — self-report only, no ground truth.</p>
+      </div>
+      <div class="card">
+        <span class="pill pill--crit">Adapter-gated</span>
+        <h3 style="margin-top:0.7rem">Detection</h3>
+        <p>The two-plane reconciliation. Offered <strong>only</strong> when an adapter exists for the detected LLM version and the ground-truth plane is wired. The word "detection" appears only when it's true.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="wrap">
+    <div class="section-head">
+      <p class="eyebrow">How it holds together</p>
+      <h2>A privileged sliver for ground truth; everything else unprivileged.</h2>
+    </div>
+    <div class="grid cols-2">
+      <div class="card">
+        <span class="num">01 · privilege split</span>
+        <h3 style="margin-top:0.5rem">The monitor never runs as root</h3>
+        <p>Ground truth is root-protected <em>by design</em> — that's what makes it unforgeable. So a tiny, dumb root collector copies audit records out to an operator-readable file; the reconciler — the big, data-holding part — runs unprivileged as the operator.</p>
+      </div>
+      <div class="card">
+        <span class="num">02 · the waist</span>
+        <h3 style="margin-top:0.5rem">One schema, many runtimes</h3>
+        <p>Adapters normalize each LLM's raw logs into one <span class="mono">NormalizedEvent</span> stream — version-keyed and drift-gated, so a format change under-reports rather than lies. Written once per LLM, shipped to everyone. The stream is also the public entrypoint others build on.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="wrap">
+    <div class="section-head">
+      <p class="eyebrow">Status · measured, and honestly bounded</p>
+      <h2>The false-positive side works structurally. Recall is not yet proven.</h2>
+    </div>
+    <div class="grid cols-3" style="margin-bottom:1.5rem">
+      <div class="stat" data-tone="ok"><div class="k">Gemini benign run</div><div class="v">34&nbsp;→&nbsp;0</div><div class="s">CONFIRMED-on-benign, baseline → tuned. The Gemini analog of Claude's 83 → 0 — structural, not threshold-tuned.</div></div>
+      <div class="stat"><div class="k">Adapters shipped</div><div class="v">2</div><div class="s">Claude Code ✓ · Gemini CLI ~✓ (0.53.1). Codex / Aider / others addable — write once, amortized.</div></div>
+      <div class="stat" data-tone="crit"><div class="k">Correlation path</div><div class="v">unval.</div><div class="s">The benign run used an in-process tool that never exec'd, so <span class="mono">matched = 0</span>. A shell-out run is needed before recall is validated.</div></div>
+    </div>
+    <div class="note">
+      <p class="eyebrow">The bound is load-bearing</p>
+      <p style="margin-bottom:0">The 0 validates <strong>scoping and classification</strong> — what eliminated the 34 false positives — not the <strong>tool_call↔exec correlation</strong>. It was reached without over-allowlisting: a startup <span class="mono">git rev-parse</span> was <em>judged</em> (it ran before any tool call, so nothing could authorize it) and pinned by exact-argv, not swept in by name; <span class="mono">curl</span> stays visible. A number that hid those would be worse than no number.</p>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    warden · working name · design doc 2026-08 — <a href="design.html">read the design</a> · <a href="findings.html">see the findings</a>
+  </div>
+</footer>
+
+<script>
+(function () {
+  var root = document.documentElement, btn = document.getElementById("tgl");
+  var KEY = "warden-theme";
+  try { var saved = localStorage.getItem(KEY); if (saved) root.setAttribute("data-theme", saved); } catch (e) {}
+  function cur() {
+    var a = root.getAttribute("data-theme");
+    if (a) return a;
+    return matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  }
+  btn.addEventListener("click", function () {
+    var next = cur() === "dark" ? "light" : "dark";
+    root.setAttribute("data-theme", next);
+    try { localStorage.setItem(KEY, next); } catch (e) {}
+  });
+})();
+</script>
+</body>
+</html>

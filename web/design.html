@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>warden — design</title>
+<meta name="description" content="The warden design doc: a governed LLM workload-runner + accountability stack.">
+<link rel="stylesheet" href="warden.css">
+</head>
+<body>
+<header class="bar">
+  <div class="wrap">
+    <span class="brand"><span class="dot"></span>warden</span>
+    <nav class="nav" aria-label="Primary">
+      <a href="index.html">Overview</a>
+      <a href="findings.html">Findings</a>
+      <a href="design.html" aria-current="page">Design</a>
+    </nav>
+    <button class="tgl" id="tgl" type="button" aria-label="Toggle color theme">theme</button>
+  </div>
+</header>
+
+<main class="wrap">
+  <article class="doc">
+    <p class="eyebrow" style="margin-top:2.5rem">Design doc · mirrors DESIGN.md · 2026-08</p>
+    <h1>warden</h1>
+    <p class="lede">A governed LLM workload-runner + accountability stack. Working name (<span class="mono">warden</span> = oversight / custody). Headed by the Incus wizard (step 0); everything else is a layer over it.</p>
+    <p><strong>One line:</strong> run an LLM agent in an isolated, egress-controlled container, and reconcile what it <em>said</em> it did against unforgeable ground truth — then attest the result and map coverage against the AI-threat landscape.</p>
+
+    <h2>0 · Thesis</h2>
+    <p>Reading an agent's own transcript is not oversight — it's trusting the thing you're supposed to be watching. warden's premise is the opposite: every claim the agent makes is checked against a plane it cannot forge (host syscalls; network egress it can't see or edit). That reconciliation — not the transcript — is the product.</p>
+    <p>The audience is dev-platform and security engineers deploying LLM agents into real workflows. The bar is actuarial: measured false-positive <em>and</em> false-negative rates, calibrated, defensible. A tool that cries wolf or certifies a blind "all clear" is a liability.</p>
+
+    <h2>1 · The stack (read bottom-up)</h2>
+    <div class="tablewrap"><table>
+      <thead><tr><th>Layer</th><th>Role</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">omega + ATLAS</td><td>coverage cartography — what we cover / where we're silent, on the AI-threat spine</td></tr>
+        <tr><td class="mono">canon</td><td>attestation / PROV — verdicts + chain-of-custody + fidelity, machine-checkable</td></tr>
+        <tr><td class="mono">agentwatch</td><td>detection — two-plane reconciliation → CONFIRMED / GAP / NONE</td></tr>
+        <tr><td class="mono">Incus wizard</td><td><strong>substrate (step 0)</strong> — isolated, egress-controlled, audited LLM runner</td></tr>
+      </tbody>
+    </table></div>
+    <p>Each layer is only meaningful over a working one below it. Build and validate bottom-up.</p>
+
+    <h2>2 · Step 0 — the Incus wizard</h2>
+    <p>The reusable foundation: an unprivileged Incus container per agent, egress-locked, with a live ground-truth plane. A second container for another LLM reuses all of it. The wizard's real value is <strong>encoding the gotchas so no one re-hits them</strong>:</p>
+    <h3>Never freeze the idmap range — derive it</h3>
+    <p>An unprivileged container's uid range can change under you; a value read once and frozen is the recurring bug (it bit three times): an audit rule from <span class="mono">volatile.idmap.base</span> (<span class="mono">0</span>) would have watched host root; a <strong>snapshot restore reallocated the idmap</strong> so a frozen rule filtered a dead range and the plane went silently blind; a probe's hardcoded default misclassified every exec. Fix: one derivation, sourced everywhere; re-derive on restore.</p>
+    <h3>Incus config traps</h3>
+    <ul>
+      <li><span class="mono">restricted=true</span> requires <span class="mono">features.profiles=true</span> (a restricted project must own its profiles).</li>
+      <li><span class="mono">images:ubuntu/*</span> no longer resolves — use <span class="mono">images:debian/12</span>.</li>
+      <li><span class="mono">btrfs-progs</span> must be installed for the pool; pin the bridge subnet (not <span class="mono">auto</span>); bridge ACLs support <span class="mono">drop</span>, not <span class="mono">reject</span>.</li>
+    </ul>
+    <h3>Egress done right</h3>
+    <p>Default-<span class="mono">drop</span> + a <strong>host-side</strong> forward proxy with a domain allowlist (SNI/CONNECT, no interception) — <em>not</em> a CIDR allowlist (pinning <span class="mono">generativelanguage.googleapis.com</span> opens most of Google) and <em>not</em> an in-guest proxy (the agent is root-in-container and could edit its own allowlist). The proxy's access log is a third, network-side ground-truth plane.</p>
+    <h3>Ground truth &amp; hygiene</h3>
+    <p>Persistent auditd rule, uid-scoped to the derived range, parsed for <em>this host's</em> <span class="mono">ausearch -i</span> dialect. Container runs unprivileged — an escape lands on an unnamed subuid, not a real account. A dedicated operator (the <span class="mono">incus</span> group, not <span class="mono">incus-admin</span>) drives it without sudo or root; optional, since the idmap is what contains. Disable sleep, pin the IP (DHCP reservation), run inside <span class="mono">tmux</span>. Optional: drive the daemon remotely via the <span class="mono">incus</span> CLI client from another machine.</p>
+
+    <h2>3 · The value ladder</h2>
+    <ul>
+      <li><strong>Sandbox</strong> <em>(always)</em> — isolated container + egress lock + the LLM + auth.</li>
+      <li><strong>Viewer</strong> <em>(cheap opt-in)</em> — the parsed-transcript timeline. Labeled <strong>viewing, not detection</strong> — self-report only.</li>
+      <li><strong>Detection</strong> <em>(opt-in, adapter-gated)</em> — the two-plane reconciliation, offered only when an adapter exists for the detected (LLM, version) and auditd is wired. The tier is derived, so "detection" only ever appears when it's true.</li>
+    </ul>
+
+    <h2>4 · Privilege split</h2>
+    <p>The monitor holds prompt-bearing data and is a lot of code — it must not run as root. Ground truth is root-protected <em>by design</em>. So: a tiny root <strong>collector</strong> copies audit records to an operator-readable file; the <strong>reconciler</strong> runs unprivileged as the operator.</p>
+
+    <h2>5 · The normalization waist</h2>
+    <p>Adapters turn each LLM's raw logs into one schema — <span class="mono">NormalizedEvent</span> — and everything else is a view over it: the live view, query/extract tools, the detector, and a public JSONL/API entrypoint.</p>
+    <ul>
+      <li><strong>Adapters are written once per LLM and shipped</strong> — one-time cost, amortized (Claude ✓, Gemini ~✓, others addable). Pinned to a schema version; <strong>version-keyed &amp; drift-gated</strong> so a format change downgrades to NONE (under-reports, safe) rather than fabricating CONFIRMEDs (lies).</li>
+      <li><strong>The public entrypoint is the strategic move</strong> — expose <span class="mono">NormalizedEvent</span> so third parties write against one schema, not each vendor's raw logs. warden becomes a normalization layer, not just a detector.</li>
+    </ul>
+
+    <h2>6 · Dev-team usage — two modes, canon spans both</h2>
+    <p>Most dev use is <strong>interactive and continuous</strong>, not autonomous workloads. Different modes, different accountability questions: autonomous → agentwatch <strong>detection</strong>; interactive → canon <strong>provenance/attestation</strong> (lineage of AI-authored code, custody of what was touched).</p>
+    <p>canon is the unifying layer: agentwatch's CONFIRMED/GAP/NONE is already canon's verdict vocabulary; canon adds PROV-O provenance + in-toto/DSSE custody and <span class="mono">fidelity_attestation</span> — a machine-checkable claim of what the detector covers and <strong>structurally cannot</strong>. <strong>omega + ATLAS</strong> maps that coverage onto MITRE ATLAS (ATT&amp;CK's analog for AI threats); ATLAS is young and sparse, so the silences <em>are</em> the map.</p>
+
+    <h2>7 · Enterprise / workload-runner — and the honest gaps</h2>
+    <p>Agents are becoming workload runners; runners need behavioral accountability. The primitives transfer (Incus is built for fleets; two-plane accountability is the IP; the adapter library is multi-vendor). But scaling <strong>inverts</strong> what we relaxed locally:</p>
+    <ul>
+      <li><strong>Prompt-sensitivity flips back on</strong> — enterprise prompts are other people's data. Multi-tenancy + RBAC + retention is the hard part.</li>
+      <li>Ground truth becomes a centralized, tamper-evident pipeline.</li>
+      <li>The reliability bar becomes a <strong>liability</strong> bar — recall must be validated.</li>
+      <li>Stack integration (SIEM, Entra, DSC/OPA) as adapters, standalone-first.</li>
+    </ul>
+    <p>Name it for direction; earn it with measured reliability.</p>
+
+    <h2>8 · Status &amp; honest limits</h2>
+    <ul>
+      <li><strong>Substrate:</strong> a working Gemini capsule exists; the wizard itself is <em>not</em> built — the knowledge is captured, the automation is next.</li>
+      <li><strong>Detection (Gemini):</strong> false-positive side works structurally — <strong>34 → 0 CONFIRMED-on-benign</strong>, without over-allowlisting.</li>
+      <li><strong>The 0 is bounded:</strong> it validates scoping/classification, not the tool_call↔exec correlation path — the benign run used an in-process tool. <strong>Recall is not yet proven.</strong></li>
+      <li><strong>Gemini telemetry</strong> is prompt-bearing; tool calls name-only unless <span class="mono">logPrompts</span> is on. Adapter version-keyed to 0.53.1.</li>
+      <li><strong>canon / omega-ATLAS:</strong> not wired in yet.</li>
+    </ul>
+
+    <h2>9 · Build order</h2>
+    <ol>
+      <li>Harden the wizard (encode §2).</li>
+      <li>Validate the detector — the shell-out run, real recall, calibration.</li>
+      <li>Stabilize the <span class="mono">NormalizedEvent</span> schema + publish the entrypoint.</li>
+      <li>Wire canon (verdicts → attested, provenance-backed claims).</li>
+      <li>omega on ATLAS (coverage cartography).</li>
+      <li>Live view, query tools, enterprise adapters — views over a validated base.</li>
+    </ol>
+  </article>
+</main>
+
+<footer>
+  <div class="wrap">warden · design · <a href="index.html">overview</a> · <a href="findings.html">findings</a></div>
+</footer>
+
+<script>
+(function () {
+  var root = document.documentElement, btn = document.getElementById("tgl"), KEY = "warden-theme";
+  try { var s = localStorage.getItem(KEY); if (s) root.setAttribute("data-theme", s); } catch (e) {}
+  function cur(){ var a = root.getAttribute("data-theme"); return a || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"); }
+  btn.addEventListener("click", function(){ var n = cur() === "dark" ? "light" : "dark"; root.setAttribute("data-theme", n); try { localStorage.setItem(KEY, n); } catch (e) {} });
+})();
+</script>
+</body>
+</html>
