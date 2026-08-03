@@ -137,3 +137,67 @@ def test_prove_capture_raises_when_range_is_stale():
     source = FakeEventSource(client)
     with pytest.raises(CaptureNotProvenError):
         prove_capture(client, source, "cap-1", stale_rng, project="warden", timeout=0.3, poll_interval=0.05)
+
+
+# --- privilege: the two halves of rule installation have different requirements ---
+
+
+def test_elevation_prefix_is_sudo_n_when_not_root():
+    from warden.privilege import elevate, elevation_prefix
+
+    assert elevation_prefix({"WARDEN_SUDO": "always"}) == ("sudo", "-n")
+    assert elevation_prefix({"WARDEN_SUDO": "never"}) == ()
+    assert elevate(["auditctl", "-l"], {"WARDEN_SUDO": "always"}) == ["sudo", "-n", "auditctl", "-l"]
+
+
+def test_persistence_failure_does_not_fail_a_working_live_rule(tmp_path, monkeypatch):
+    """The live `auditctl` rule is what captures; the rules.d file only survives a reboot. A host
+    whose sudo grant does not include writing a root-owned directory still gets a working plane,
+    and is TOLD that persistence was skipped rather than left to assume it."""
+    from warden.auditd import RealAuditRuleInstaller
+    from warden.idmap import IdRange
+
+    installer = RealAuditRuleInstaller(rules_dir=str(tmp_path / "unwritable"))
+    monkeypatch.setattr(RealAuditRuleInstaller, "_write_rule_file", staticmethod(lambda p, c: False))
+    monkeypatch.setattr(RealAuditRuleInstaller, "_delete_loaded", classmethod(lambda cls, k: None))
+    monkeypatch.setattr(RealAuditRuleInstaller, "_is_loaded", classmethod(lambda cls, k: True))
+    monkeypatch.setattr(
+        "warden.auditd.subprocess.run",
+        lambda *a, **k: type("P", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
+    )
+    installer.install("wd-1", IdRange(host_start=100000, count=65536))
+    assert installer.persistence_installed is False
+
+
+def test_prune_reads_the_loaded_rules_not_only_the_directory(monkeypatch):
+    """A rule loaded with no file on disk — after a crash, or where persistence was skipped — is
+    exactly the D14 shadowing hazard, and a file-only scan cannot see it."""
+    from warden.auditd import RealAuditRuleInstaller
+
+    installer = RealAuditRuleInstaller(rules_dir="/nonexistent-rules-dir")
+    monkeypatch.setattr(
+        RealAuditRuleInstaller, "_loaded_lines",
+        staticmethod(lambda: [
+            "-a always,exit -F arch=b64 -S execve -F uid>=1 -F uid<=2 -F key=warden-dead",
+            "-a always,exit -F arch=b64 -S execve -F uid>=3 -F uid<=4 -F key=warden-alive",
+            "-a always,exit -F arch=b64 -S execve -F uid>=5 -F uid<=6 -F key=capsule",
+        ]),
+    )
+    uninstalled = []
+    monkeypatch.setattr(
+        RealAuditRuleInstaller, "uninstall",
+        lambda self, instance: uninstalled.append(instance),
+    )
+    installer.prune({"alive"})
+    assert uninstalled == ["dead"]  # never the capsule's key
+
+
+def test_prune_never_touches_a_foreign_key(monkeypatch):
+    from warden.auditd import RealAuditRuleInstaller
+
+    installer = RealAuditRuleInstaller(rules_dir="/nonexistent-rules-dir")
+    monkeypatch.setattr(
+        RealAuditRuleInstaller, "_loaded_lines",
+        staticmethod(lambda: ["-a always,exit -S execve -F key=capsule"]),
+    )
+    assert installer._loaded_warden_instances() == set()

@@ -151,9 +151,10 @@ def _up(args: argparse.Namespace) -> int:
 
     args.allowlist_file.parent.mkdir(parents=True, exist_ok=True)
     client = RealIncusClient()
+    audit_installer = RealAuditRuleInstaller()
     app = WardenApp(
         client,
-        audit_installer=RealAuditRuleInstaller(),
+        audit_installer=audit_installer,
         event_source_factory=lambda inst: RealEventSource(inst),
         proxy_controller=RealProxyAllowlistController(
             args.allowlist_file, bind=profiles.BRIDGE_GATEWAY, port=profiles.PROXY_PORT
@@ -172,6 +173,15 @@ def _up(args: argparse.Namespace) -> int:
     print(f"up: {result.instance} created={result.created} idmap-uid={result.idmap.uid}")
     if result.capture_proof is not None:
         print(f"auditd: capture proven (uid={result.capture_proof.uid})")
+    if audit_installer.persistence_installed is False:
+        # The live rule is loaded and proven capturing; only reboot-persistence was skipped.
+        # Said out loud, because the alternative is an operator who believes the plane survives a
+        # restart when it does not.
+        print(
+            "auditd: rules.d persistence SKIPPED (no write access) — the live rule is loaded and "
+            "proven, but it will not survive a reboot",
+            file=sys.stderr,
+        )
     return 0
 
 

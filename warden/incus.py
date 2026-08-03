@@ -9,9 +9,12 @@ DECISIONS.md ("Dependency injection over subprocess mocking").
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
+
+from warden.privilege import elevate
 
 # Every `incus` invocation is bounded. The validation run caught the reason:
 # an `incus launch` client sat for 25 minutes while the daemon had in fact
@@ -162,7 +165,14 @@ class RealIncusClient:
         input_bytes: bytes | None = None,
         timeout: float = QUERY_TIMEOUT,
     ) -> subprocess.CompletedProcess:
-        argv = [self._bin, *args]
+        # Checked before the elevation prefix goes on, not after. With `sudo -n incus …` the
+        # process that actually launches is `sudo`, which exists — so a missing `incus` comes back
+        # as sudo's own rc=1 "command not found" rather than a FileNotFoundError, and the clear
+        # "Incus isn't installed here, see install-incus-nested.sh" message was silently replaced
+        # by an opaque exit code the moment elevation was introduced.
+        if shutil.which(self._bin) is None:
+            raise IncusNotFoundError(self._bin)
+        argv = elevate([self._bin, *args])
         try:
             return subprocess.run(
                 argv, capture_output=True, input=input_bytes,
@@ -187,7 +197,8 @@ class RealIncusClient:
         proc = self._run(args, input_bytes=input_bytes, timeout=timeout)
         if proc.returncode != 0:
             stderr = proc.stderr if isinstance(proc.stderr, str) else proc.stderr.decode(errors="replace")
-            raise IncusCommandError([self._bin, *args], proc.returncode, stderr)
+            # The elevated argv, so the message is the command that actually ran.
+            raise IncusCommandError(elevate([self._bin, *args]), proc.returncode, stderr)
         return proc
 
     # -- existence ------------------------------------------------------
@@ -342,7 +353,9 @@ class RealIncusClient:
         "the agent produced no transcript" from "the pull broke", which are
         very different things to report.
         """
-        argv = [self._bin, "file", "pull", f"{name}/{remote_path}", "-", "--project", project]
+        if shutil.which(self._bin) is None:
+            raise IncusNotFoundError(self._bin)
+        argv = elevate([self._bin, "file", "pull", f"{name}/{remote_path}", "-", "--project", project])
         try:
             proc = subprocess.run(argv, capture_output=True, timeout=LIFECYCLE_TIMEOUT)
         except FileNotFoundError:

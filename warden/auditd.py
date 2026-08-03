@@ -29,6 +29,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
+from warden.privilege import elevate
+
 if TYPE_CHECKING:
     from warden.idmap import IdRange
     from warden.incus import IncusClient
@@ -292,17 +294,41 @@ class RealAuditRuleInstaller:
       The next instance to be allocated that freed uid range was captured
       under the *dead* instance's key. `prune()` is the fix, and
       `uninstall()` stops it happening in the first place.
+
+    **The two halves have different privilege requirements, and only one is
+    load-bearing.** The live load (`auditctl`) is what actually captures, and
+    it is elevated per-invocation (see `warden/privilege.py`). The persistent
+    file in `/etc/audit/rules.d` only survives a reboot, and writing it needs
+    write access to a root-owned directory that a scoped
+    `incus/auditctl/ausearch/nft` sudo grant deliberately does not include.
+
+    So persistence is **best-effort and says so**: `persistence_installed`
+    records whether the file was written, and a run that could not write it
+    still captures correctly — it just does not survive a reboot. Failing the
+    whole `up` for that would trade a working ground-truth plane for a
+    property the demo does not use. Claiming it silently would be worse: the
+    operator would believe the rule outlives a restart when it does not.
+
+    `prune` therefore reads the **loaded rules**, not the directory, and falls
+    back to the directory when it is readable. That is strictly better than
+    the file-only version regardless of privilege: a rule that is loaded with
+    no file on disk — after a crash, or on any host where persistence was
+    skipped — is exactly the shadowing hazard D14 is about, and the file-based
+    scan could not see it at all.
     """
 
     RULE_FILE_GLOB = f"60-{RULE_KEY_PREFIX}-*.rules"
 
     def __init__(self, rules_dir: str = "/etc/audit/rules.d"):
         self.rules_dir = Path(rules_dir)
+        #: Set by `install`. None until then; False means the live rule is loaded but will not
+        #: survive a reboot. Read by the CLI so the operator is told rather than left to assume.
+        self.persistence_installed: bool | None = None
 
     # -- helpers -----------------------------------------------------------
     @staticmethod
     def _loaded_lines() -> list[str]:
-        proc = subprocess.run(["auditctl", "-l"], capture_output=True, text=True)
+        proc = subprocess.run(elevate(["auditctl", "-l"]), capture_output=True, text=True)
         if proc.returncode != 0:
             return []
         return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
@@ -328,7 +354,7 @@ class RealAuditRuleInstaller:
                 else:
                     args.append(tok)
                 i += 1
-            subprocess.run(["auditctl", *args], capture_output=True, text=True)
+            subprocess.run(elevate(["auditctl", *args]), capture_output=True, text=True)
 
     @classmethod
     def _is_loaded(cls, key: str) -> bool:
@@ -339,38 +365,87 @@ class RealAuditRuleInstaller:
     # -- protocol ----------------------------------------------------------
     def install(self, instance: str, uid_range: "IdRange") -> None:
         key = rule_key(instance)
-        self.rules_dir.mkdir(parents=True, exist_ok=True)
-        # persistence across reboot
-        Path(rule_file_path(instance)).write_text(generate_rule(uid_range, instance))
+        # Best-effort persistence across reboot; the live load below is the load-bearing half.
+        self.persistence_installed = self._write_rule_file(
+            rule_file_path(instance), generate_rule(uid_range, instance)
+        )
         # live load: replace whatever is currently loaded under this key,
         # so a re-derived range after a restore actually takes effect
         self._delete_loaded(key)
         for fragment in rule_fragments(uid_range, instance):
-            proc = subprocess.run(["auditctl", "-a", *fragment], capture_output=True, text=True)
+            proc = subprocess.run(
+                elevate(["auditctl", "-a", *fragment]), capture_output=True, text=True
+            )
             if proc.returncode != 0:
                 raise AuditRuleLoadError(
                     f"auditctl -a for {instance} failed (rc={proc.returncode}): {proc.stderr.strip()}"
                 )
         if not self._is_loaded(key):
             raise AuditRuleLoadError(
-                f"{instance}: rule written to {rule_file_path(instance)} but key {key!r} is "
-                "not present in `auditctl -l` — the kernel does not have it"
+                f"{instance}: key {key!r} is not present in `auditctl -l` — the kernel does not "
+                "have the rule. This is the only half that matters for capture; do not trust a "
+                "written rules.d file as evidence the plane is live."
             )
+
+    @staticmethod
+    def _write_rule_file(path: str, content: str) -> bool:
+        """True if the persistent rule file was written. False — not an exception — when the
+        directory is not writable: the live rule still captures, and the caller reports the
+        reduced guarantee instead of failing a working plane."""
+        try:
+            target = Path(path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content)
+            return True
+        except (PermissionError, OSError):
+            return False
+
+    @staticmethod
+    def _remove_rule_file(path: str) -> None:
+        try:
+            Path(path).unlink(missing_ok=True)
+        except (PermissionError, OSError):
+            # It was probably never written — the same privilege that blocks the unlink blocked
+            # the write. Nothing to clean up, and the live rule is already gone by this point.
+            pass
 
     def uninstall(self, instance: str) -> None:
         self._delete_loaded(rule_key(instance))
-        Path(rule_file_path(instance)).unlink(missing_ok=True)
+        self._remove_rule_file(rule_file_path(instance))
+
+    def _loaded_warden_instances(self) -> set[str]:
+        """Instance names with a rule currently loaded in the kernel, from `auditctl -l`."""
+        instances: set[str] = set()
+        prefix = f"{RULE_KEY_PREFIX}-"
+        for line in self._loaded_lines():
+            for token in line.split():
+                key = token[len("key="):] if token.startswith("key=") else token
+                if key.startswith(prefix):
+                    instances.add(key[len(prefix):])
+        return instances
 
     def prune(self, live_instances: set[str]) -> None:
-        """Drop rules for warden instances that no longer exist.
+        """Drop warden rules for instances that no longer exist.
 
-        Covers the crash case as well as the clean one: a run that dies
-        between `incus delete` and `uninstall` leaves a rule file behind,
-        and the next `up` would otherwise inherit the shadowing bug."""
-        for path in self.rules_dir.glob(self.RULE_FILE_GLOB):
-            instance = path.name[len(f"60-{RULE_KEY_PREFIX}-"):-len(".rules")]
-            if instance and instance not in live_instances:
-                self.uninstall(instance)
+        Covers the crash case as well as the clean one: a run that dies between `incus delete` and
+        `uninstall` leaves its rule behind, and the next `up` inherits the D14 shadowing bug —
+        the kernel's exit filter stops at the first matching rule, so a dead instance's rule with
+        an overlapping uid range tags a live instance's execs under the dead key.
+
+        Reads the LOADED rules first and the rules.d directory second. The directory alone was
+        never sufficient: a rule loaded with no file on disk — after a crash, or on any host where
+        persistence was skipped — is precisely the hazard, and a file scan cannot see it.
+        """
+        stale = self._loaded_warden_instances()
+        try:
+            for path in self.rules_dir.glob(self.RULE_FILE_GLOB):
+                name = path.name[len(f"60-{RULE_KEY_PREFIX}-"):-len(".rules")]
+                if name:
+                    stale.add(name)
+        except (PermissionError, OSError):
+            pass  # unreadable rules.d — the loaded-rule scan above is the authoritative one anyway
+        for instance in stale - set(live_instances):
+            self.uninstall(instance)
 
 
 class RealEventSource:
@@ -387,7 +462,7 @@ class RealEventSource:
     def poll(self) -> list[AuditEvent]:
         try:
             proc = subprocess.run(
-                ["ausearch", "-k", self.key, "--raw"], capture_output=True, text=True
+                elevate(["ausearch", "-k", self.key, "--raw"]), capture_output=True, text=True
             )
             if proc.returncode == 0 and proc.stdout.strip():
                 return parse_events(proc.stdout)

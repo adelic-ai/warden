@@ -555,3 +555,49 @@ on a file that looks harmless to edit.
 
 The loop runs in project `wardendemo`, never `warden`, and asserts the `warden` project stays
 empty — a demo must not share a project with a co-located capsule build.
+
+## D28 — per-invocation `sudo -n`, not `sudo warden`
+
+Driving the real end-to-end run surfaced that the real adapters shell out to `incus` and
+`auditctl` unelevated. On the validation host the operator is in `sudo` but not in `incus`, so
+`incus` cannot reach the daemon socket and `auditctl` refuses outright. DEMO-SPEC §9 already asked
+for "scoped sudo if run hands-off (incus/auditctl/ausearch/nft)"; this is that.
+
+**Per-invocation, not per-process.** `sudo warden up` would have been one line, and it is the wrong
+shape: running the whole wizard as root moves `Path.home()` to `/root`, so the allowlist file, the
+run directory and every exported artifact silently relocate — and the *monitor*, which holds
+prompt-bearing data and is most of the code, ends up with exactly the privilege DESIGN §4's split
+exists to keep it away from. So the process stays unprivileged and only the individual
+root-requiring invocations are elevated (`warden/privilege.py`). `sudo -n` never prompts: a
+hands-off run that blocks on a password is a hang with no output, which reads like a broken plane.
+
+### Two things this broke, both caught
+
+**The missing-binary message.** With `sudo -n incus …` the process that launches is `sudo`, which
+exists — so a missing `incus` came back as sudo's own rc=1 "command not found" instead of a
+`FileNotFoundError`, and the clear "Incus isn't installed here, see install-incus-nested.sh"
+message was silently replaced by an opaque exit code. `shutil.which` is now checked *before* the
+prefix goes on. A pre-existing test caught this; it is the kind of regression that would otherwise
+only surface on someone else's fresh box.
+
+**The rules.d write.** `/etc/audit/rules.d` is root-owned and writing it is *not* in a scoped
+`incus/auditctl/ausearch/nft` grant. Widening the grant (a `tee`/`rm` rule, or a second privileged
+script that writes arbitrary paths) buys only reboot-persistence, at the cost of a much broader
+privilege than the read-only collector. So persistence is **best-effort and reported**:
+`persistence_installed` records whether the file was written, `warden up` says so on stderr when it
+was not, and the live `auditctl` rule — the half that actually captures — is unaffected. Failing a
+working ground-truth plane over a property the demo does not use would be the wrong trade; claiming
+it silently would be worse.
+
+### `prune` now reads the loaded rules, and that is a fix, not a workaround
+
+It scanned `rules.d` for stale instances. Where persistence is skipped there are no files, so it
+would have found nothing — but the *loaded* rules are still there, and a dead instance's loaded
+rule with an overlapping uid range is precisely the D14 shadowing hazard (the kernel's exit filter
+stops at the first match, tagging a live instance's execs under the dead key). It now derives stale
+instances from `auditctl -l` and adds the directory scan when readable. That is strictly better
+than the file-only version on *any* host: a rule loaded with no file — after a crash, on any
+machine — was previously invisible to it.
+
+The key-prefix filter is unchanged and tested: `prune` only ever considers `warden-*` keys, so a
+co-located capsule's rule is never a candidate.
