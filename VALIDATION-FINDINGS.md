@@ -1,5 +1,14 @@
 # warden wizard — first real-Incus validation (pop-os) — findings & fix directives
 
+> **STATUS: all six findings fixed on `fix/real-incus-validation`; §4 tests 1-4 green against
+> real Incus 7.3.** See DECISIONS.md D13-D20 for the calls made and what was rejected.
+> Two further bugs surfaced while fixing these, both of the same "reports success without
+> measuring" shape the findings below describe — D17 (the audit parser could fabricate a
+> capture-proven event) and D18 (the acceptance harness itself manufactured the "ausearch
+> found no marker" red). Finding 2's suspicion that per-instance idmap derivation was broken
+> was **not** confirmed: the derivation was correct, and the second instance's 1065536 range
+> was genuine. The real cause was a deleted instance's audit rule shadowing it (D14).
+
 **Context.** This repo (`~/dev/warden-wizard-review`, branch `build`) was logic-proven against a
 FakeIncusClient in the agent-vm, which had no root, so it was **never run against real Incus** until
 now. It has now run `sudo scripts/run-acceptance-nested.sh` against pop-os real Incus 7.3, in an
