@@ -23,8 +23,64 @@ WARDEN="python3 -m warden.cli"
 PROJECT="warden"
 FAIL=0
 
+# The tests never call Gemini — the key is only needed so `warden up` does not
+# stop at its NEEDS-HUMAN gate for the gemini flavor. Default it so the suite
+# runs under a plain `sudo scripts/run-acceptance-nested.sh`; a real key in the
+# environment is still honoured.
+: "${GEMINI_API_KEY:=dummy-setup-only-not-a-real-key}"
+export GEMINI_API_KEY
+
+LAN_GW="$(ip route | awk '/default/ {print $3; exit}')"
+
 pass() { echo "PASS: $*"; }
 fail() { echo "FAIL: $*" >&2; FAIL=1; }
+
+# `producer | grep -q` is a trap in a `set -o pipefail` script, and it is the
+# whole of the "ausearch found no marker" red: `grep -q` exits at the FIRST
+# match and closes the pipe, the producer takes SIGPIPE, and the pipeline
+# reports 141 *because the match was found*. Measured on this host:
+# `ausearch -k capsule --raw` emits 1.4MB / 978 matching records and the naive
+# pipeline still returns non-zero. It fails in both directions — a real match
+# read as absent (a fake red) and, for the checks that pass *on* absence, a
+# fake green. So: buffer the output, then match it. No pipe, no signal.
+buffer() { "$@" 2>/dev/null || true; }
+matches() {  # matches <pattern> <text>
+  local pattern="$1" text="${2-}"
+  grep -q -- "${pattern}" <<<"${text}"
+}
+
+# Egress probes. `--noproxy '*'` bypasses the proxy env warden sets on the
+# instance, so it measures the NETWORK layer; without it, the request goes
+# through the host-side allowlist proxy and measures the ALLOWLIST. A denial
+# has to be distinguishable from a success, hence %{http_code} rather than
+# curl's exit status: the capsule build aborted a passing run once by reading
+# a working 403 denial as a breach.
+code_direct() {
+  incus exec "$1" --project "${PROJECT}" -- \
+    curl -sS -o /dev/null -w '%{http_code}' --noproxy '*' -m 6 "$2" 2>/dev/null || true
+}
+code_proxy() {
+  incus exec "$1" --project "${PROJECT}" -- \
+    curl -sS -o /dev/null -w '%{http_code}' -m 20 "$2" 2>/dev/null || true
+}
+
+# ---------------------------------------------------------------------------
+# Pre-flight: leave no state from a previous (possibly crashed) run. Touches
+# ONLY warden's own instances and proxy — never the gemini-capsule project
+# sharing this host.
+# ---------------------------------------------------------------------------
+preflight() {
+  echo "== pre-flight: clearing leftovers from any previous run =="
+  for inst in cap-mon cap-build cap-mon2 cap-build2; do
+    if incus config show "${inst}" --project "${PROJECT}" >/dev/null 2>&1; then
+      ${WARDEN} down "${inst}" --project "${PROJECT}" || true
+    fi
+  done
+  # A proxy left over from an earlier version of this code would be reused by
+  # `warden up` (something is listening), so the run would test stale code.
+  pkill -f 'warden\.cli proxy' 2>/dev/null || true
+  sleep 1
+}
 
 # ---------------------------------------------------------------------------
 # Test 1: warden up --flavor monitored
@@ -40,30 +96,61 @@ test_1_monitored() {
   [[ "${hostid}" -gt 0 ]] && pass "unprivileged (host uid start ${hostid})" || fail "idmap starts at host uid 0"
 
   # no host disk device
-  if incus config show cap-mon --project "${PROJECT}" | grep -A2 'root:' | grep -q 'source:'; then
+  local root_dev
+  root_dev="$(buffer incus config show cap-mon --project "${PROJECT}" | grep -A2 'root:' || true)"
+  if matches 'source:' "${root_dev}"; then
     fail "instance has a host-sourced disk device"
   else
     pass "no host disk device"
   fi
 
-  # egress: reaches the allowlisted LLM host, not a LAN IP, not a
-  # non-allowlisted domain
-  incus exec cap-mon --project "${PROJECT}" -- curl -sS -o /dev/null -w '%{http_code}' \
-    --connect-timeout 5 https://generativelanguage.googleapis.com/ >/tmp/warden-egress-llm.txt || true
-  grep -qE '^(200|301|302|404)$' /tmp/warden-egress-llm.txt && pass "egress reaches LLM host" || fail "egress to LLM host did not respond"
+  # egress, measured at both layers.
+  # 1. the allowlisted LLM host is reachable THROUGH the proxy. This also
+  #    establishes the proxy is up, so a 000 below means "denied", not
+  #    "nothing listening".
+  local llm_code
+  llm_code="$(code_proxy cap-mon https://generativelanguage.googleapis.com/)"
+  case "${llm_code}" in
+    200|301|302|400|404) pass "egress reaches LLM host through the proxy (${llm_code})" ;;
+    *) fail "egress to LLM host did not respond (${llm_code})" ;;
+  esac
 
-  if incus exec cap-mon --project "${PROJECT}" -- curl -sS -o /dev/null --connect-timeout 3 https://example.com/ 2>/dev/null; then
-    fail "egress reached a non-allowlisted domain (example.com) — should have been blocked"
-  else
-    pass "non-allowlisted domain correctly blocked"
-  fi
+  # 2. a non-allowlisted domain is refused BY the proxy
+  local ex_code
+  ex_code="$(code_proxy cap-mon https://example.com/)"
+  [[ "${ex_code}" == "000" ]] \
+    && pass "non-allowlisted domain refused by the proxy allowlist (${ex_code})" \
+    || fail "egress reached a non-allowlisted domain (example.com -> ${ex_code}) — should have been blocked"
+
+  # 3. and there is no way AROUND the proxy at the network layer
+  local ex_direct
+  ex_direct="$(code_direct cap-mon https://example.com/)"
+  [[ "${ex_direct}" == "000" ]] \
+    && pass "no direct egress bypassing the proxy (${ex_direct})" \
+    || fail "direct egress bypassed the proxy (example.com -> ${ex_direct})"
 
   # auditd capture is proven by `warden up` itself (prove_capture); double
   # check independently via ausearch, raw, per §1 ("never trust auditctl -l")
-  if ausearch -k "warden-cap-mon" --raw 2>/dev/null | grep -q 'WARDEN_MARKER_'; then
-    pass "independent ausearch confirms marker capture"
+  # Retried, not a single shot: auditd's flush is not synchronous with the
+  # exec, and the capsule build twice diagnosed a working plane as broken by
+  # looking exactly once after a 2-3s sleep.
+  local seen=no records
+  for _ in $(seq 1 15); do
+    records="$(buffer ausearch -k "warden-cap-mon" --raw)"
+    if matches 'WARDEN_MARKER_' "${records}"; then
+      seen=yes; break
+    fi
+    sleep 1
+  done
+  if [[ "${seen}" == "yes" ]]; then
+    pass "independent ausearch confirms marker capture under warden-cap-mon"
   else
     fail "ausearch found no marker for warden-cap-mon"
+    # Distinguish "the rule captured nothing" from "the rule isn't loaded" —
+    # the first real run had no way to tell these apart from the failure alone.
+    echo "  loaded rules for this key:" >&2
+    buffer auditctl -l | grep 'warden-cap-mon' >&2 || echo "  (none)" >&2
+    echo "  records under the key: $(grep -c 'type=SYSCALL' <<<"${records}" || true)" >&2
   fi
 
   # clean snapshot exists
@@ -91,16 +178,26 @@ test_2_builder() {
   incus exec cap-build --project "${PROJECT}" -- test -d /root/repo/.git \
     && pass "git clone landed a real repo" || fail "no /root/repo/.git after clone"
 
-  incus exec cap-build --project "${PROJECT}" -- curl -sS -o /dev/null -w '%{http_code}' \
-    --connect-timeout 5 https://github.com/ >/tmp/warden-egress-gh.txt || true
-  grep -qE '^(200|301|302)$' /tmp/warden-egress-gh.txt && pass "egress reaches GitHub" || fail "egress to GitHub failed"
+  local gh_code
+  gh_code="$(code_proxy cap-build https://github.com/)"
+  case "${gh_code}" in
+    200|301|302) pass "egress reaches GitHub through the proxy (${gh_code})" ;;
+    *) fail "egress to GitHub failed (${gh_code})" ;;
+  esac
 
-  if incus exec cap-build --project "${PROJECT}" -- curl -sS -o /dev/null --connect-timeout 3 \
-      "http://$(ip route | awk '/default/ {print $3}')/" 2>/dev/null; then
-    fail "egress reached the LAN gateway — should be blocked"
-  else
-    pass "LAN correctly unreachable"
-  fi
+  # The LAN, at both layers again. Directly it must not route at all; through
+  # the proxy an IP literal matches no allowlist entry, so the proxy refuses
+  # it (403) — a refusal, not a reachable host.
+  local lan_direct lan_proxy
+  lan_direct="$(code_direct cap-build "http://${LAN_GW}/")"
+  [[ "${lan_direct}" == "000" ]] \
+    && pass "LAN gateway unreachable directly (${lan_direct})" \
+    || fail "egress reached the LAN gateway directly (${LAN_GW} -> ${lan_direct}) — should be blocked"
+
+  lan_proxy="$(code_proxy cap-build "http://${LAN_GW}/")"
+  [[ "${lan_proxy}" == "403" || "${lan_proxy}" == "000" ]] \
+    && pass "LAN gateway refused by the proxy allowlist (${lan_proxy})" \
+    || fail "the proxy served the LAN gateway (${LAN_GW} -> ${lan_proxy}) — allowlist not enforced"
 }
 
 # ---------------------------------------------------------------------------
@@ -112,7 +209,9 @@ test_3_idempotent_reversible() {
   pass "re-run of warden up did not error"
 
   ${WARDEN} down cap-mon --project "${PROJECT}"
-  incus list --project "${PROJECT}" --format csv | cut -d, -f1 | grep -qx cap-mon \
+  local names
+  names="$(buffer incus list --project "${PROJECT}" --format csv | cut -d, -f1)"
+  matches '^cap-mon$' "${names}" \
     && fail "cap-mon still exists after warden down" || pass "instance removed by warden down"
 
   incus project show "${PROJECT}" >/dev/null 2>&1 && pass "host project unchanged" || fail "project vanished"
@@ -138,14 +237,21 @@ test_4_side_by_side() {
   [[ "${mon_hostid}" != "${build_hostid}" ]] && pass "distinct idmaps (${mon_hostid} vs ${build_hostid})" \
     || fail "both instances got the same idmap start"
 
-  ausearch -k "warden-cap-build2" --raw 2>/dev/null | grep -q . \
-    && fail "builder instance unexpectedly has audit rule activity" \
-    || pass "distinct audit scoping: no rule for the builder instance"
+  # This one passes *on absence*, so the SIGPIPE trap would have turned a real
+  # breach into a green. Buffered for that reason specifically.
+  local builder_records
+  builder_records="$(buffer ausearch -k "warden-cap-build2" --raw)"
+  if [[ -n "${builder_records}" ]]; then
+    fail "builder instance unexpectedly has audit rule activity"
+  else
+    pass "distinct audit scoping: no rule for the builder instance"
+  fi
 
   ${WARDEN} down cap-mon2 --project "${PROJECT}"
   ${WARDEN} down cap-build2 --project "${PROJECT}"
 }
 
+preflight
 test_1_monitored
 test_2_builder
 test_3_idempotent_reversible
