@@ -19,6 +19,7 @@ from warden.config import NeedsHumanError, build_config, resolve_llm_auth
 from warden.example_prompt import EXAMPLE_PROMPT
 from warden.incus import IncusCommandError, IncusNotFoundError, RealIncusClient
 from warden.proxy import RealProxyAllowlistController, run_forever
+from warden.export import Exporter
 from warden.report import REPORT_NAME, ReportError, Reporter, render
 from warden.workload import MANIFEST_NAME, RunManifest, WorkloadError, WorkloadRunner, run_dir_for
 
@@ -86,6 +87,14 @@ def build_parser() -> argparse.ArgumentParser:
                         help="(implied — report requires the ground-truth plane)")
     report.add_argument("--out", type=Path, default=DEFAULT_RUNS_DIR, help="host artifact root")
     report.add_argument("--host", default=None, help="hostname recorded in verdicts; defaults to this host")
+
+    export = sub.add_parser("export", help="tar everything out: copy all, nothing summarised")
+    export.add_argument("dest", type=Path, help="directory to write the tarball into")
+    export.add_argument("--instance", default=None, help="defaults to warden-<flavor>")
+    export.add_argument("--flavor", choices=["monitored", "builder"], default="builder")
+    export.add_argument("--llm", choices=["claude", "gemini"], required=True)
+    export.add_argument("--project", default="warden")
+    export.add_argument("--out", type=Path, default=DEFAULT_RUNS_DIR, help="host artifact root")
 
     down = sub.add_parser("down", help="remove a sandboxed instance (host substrate is unchanged)")
     down.add_argument("instance")
@@ -270,6 +279,36 @@ def _report(args: argparse.Namespace) -> int:
     return 0
 
 
+def _export(args: argparse.Namespace) -> int:
+    instance = args.instance or f"warden-{args.flavor}"
+    cfg = build_config(
+        instance=instance, flavor=args.flavor, llm=args.llm, project=args.project, audit=True
+    )
+    run_dir = run_dir_for(args.out, cfg.project, cfg.instance)
+    manifest_path = run_dir / MANIFEST_NAME
+    if not manifest_path.exists():
+        print(f"error: no run manifest at {manifest_path} — nothing to export", file=sys.stderr)
+        return 1
+
+    try:
+        result = Exporter(RealIncusClient()).export(
+            cfg, RunManifest.load(manifest_path), run_dir, args.dest
+        )
+    except IncusNotFoundError as exc:
+        print(f"NEEDS-HUMAN: {exc}", file=sys.stderr)
+        return 2
+    except IncusCommandError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"export: {result.archive} ({len(result.present)} artifacts)")
+    if result.missing:
+        # Named, not swallowed: a tarball that is quietly short an artifact reads as a complete
+        # one. CONTENTS.json inside carries the same list with reasons.
+        print(f"export: NOT present — {', '.join(result.missing)} (see CONTENTS.json for why)")
+    return 0
+
+
 def _down(args: argparse.Namespace) -> int:
     client = RealIncusClient()
     # The audit installer is wired here too: `down` must take the
@@ -330,6 +369,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run(args)
     if args.command == "report":
         return _report(args)
+    if args.command == "export":
+        return _export(args)
     if args.command == "down":
         return _down(args)
     if args.command == "restore":

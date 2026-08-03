@@ -483,3 +483,26 @@ them, and the test asserts the *keys* — no `deviation`, `risk_score`, `severit
 It runs as root via a sudo rule, so a caller that could choose an arbitrary key could read any
 audit stream on the host — a wider grant than the privilege split intends. It only ever reads, and
 never `auditctl -D`: a co-located capsule build has its own rule here.
+
+## D25 — `warden export`: the archive says what it is missing, and labels the git history a claim
+
+DEMO-SPEC §5/§11.4. `export` is deliberately dumb — it collects and never summarises, because §7's
+"no analysis engine" means the consumer analyses. Two things it does that a plain `tar` would not:
+
+**`CONTENTS.json` lists every artifact §5 asks for, present or not, with a reason.** An archive
+silently lacking `verdicts.jsonl` is indistinguishable from one where the reconciliation found
+nothing to verdict, and those are opposite claims. Same for the built repo: "the agent never
+created one" is a fact *about the run*, so it is recorded rather than raised — a traceback there
+would also have cost the reader the audit capture and the findings, which are the parts that
+matter most.
+
+**`README.txt` labels the git history as claimed, not verified.** §5 says it outright: git history
+is agent-controlled — the agent picks what to `git add` and what the message says — so it is the
+*claimed* work product, reconcilable against FILE_WRITE ground truth (a v2 axis, §10) and not
+trustworthy alone. That sentence ships inside the archive, along with which plane is forgeable and
+which is not, and the three limits from §7. A caveat that lives in a README on the producer's
+machine is not a caveat; one that travels with the data is.
+
+The archive name is derived from the run's own clock, so two exports of one run produce one path
+rather than a pile of near-identical tarballs. Members are rooted in a single directory — an
+archive that explodes into the reader's cwd is a hostile artifact.
