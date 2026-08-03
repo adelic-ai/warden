@@ -1,75 +1,117 @@
-# warden-wizard
+# warden
 
-`warden up --flavor <monitored|builder> …` stands up a sandboxed LLM-agent container on an
-Incus host. One codepath, two flavors — see `/tmp/WIZARD-SPEC.md` (source spec) for the design.
+**Don't trust an agent's account of itself. Reconcile it against a plane it can't forge.**
 
-## Status
+warden is a reference model for **governed LLM deployment**: run an LLM agent in an isolated,
+egress-controlled container, and reconcile what it *said* it did (its transcript) against
+unforgeable ground truth (the host syscalls it actually made, the network it actually reached).
+That reconciliation — not the transcript — is the product. Reading the transcript alone is
+trusting the thing you're supposed to be watching.
 
-Built hands-off per the spec's §5 (Lima + nested Incus). **This particular VM has no root
-path available to the build agent** (no sudo, no docker/pkexec, not in the `sudo` group) —
-see `NEEDS-HUMAN.md`. That blocks actually installing Incus and running the real §4
-acceptance tests here. What's in this repo instead:
+> **An assembly, not *the* assembly.** This is a PoC / prototype — *one* coherent way to wire
+> accountable autonomy from composable parts, not a product you adopt wholesale. Every layer is
+> an independent repo; use any subset. warden is the reference that shows them working together.
 
-- The full `warden` implementation (idmap derivation, profiles, egress/proxy, auditd wiring,
-  CLI) — written against a real `incus` CLI wrapper (`warden/incus.py`).
-- A `FakeIncus` test double (`tests/fakes.py`) that models the parts of Incus's behavior the
-  logic depends on (idmap (re)allocation on launch/restore, snapshots, exec, an in-memory
-  audit trail keyed by host-mapped uid). The §4 acceptance scenarios are encoded as tests
-  against this fake in `tests/test_acceptance.py` — they prove the *logic*, not the real
-  substrate.
-- `warden/proxy.py`'s CONNECT-allowlist proxy is tested for real (`tests/test_proxy.py`) —
-  it's just a userspace TCP listener on a high port, no root needed, so that one gotcha is
-  proven against live network egress, not a fake.
-- `scripts/install-incus-nested.sh` and `scripts/run-acceptance-nested.sh` — written and
-  ready to run *with root*, either by a human in this VM or by a future session that has
-  one. That's the missing last mile; see `NEEDS-HUMAN.md`.
+## Two shapes, one substrate
+
+The same wizard stands up two flavors from one codepath (`--flavor`):
+
+| | **builder** | **monitored** |
+|---|---|---|
+| for | your dev / platform engineers | LLM *workloads* |
+| use | hands-off building (skip-permissions is safe — it's sandboxed) | a watched runner |
+| egress | proxy allowlist → LLM API **+ GitHub/npm/registries** | proxy allowlist → **LLM API only** |
+| repo/git | cloned repo + git | none |
+| ground-truth plane (auditd) | optional | **wired** |
+
+Free rein is safe in `builder` *because* it's contained; `monitored` is the microscope slide.
+
+## The stack (read bottom-up — each layer only means something over a working one below it)
+
+| Layer | Repo | Role |
+|---|---|---|
+| **omega + ATLAS** | [adelic-ai/omega](https://github.com/adelic-ai/omega) | coverage cartography — what we catch, and where we're silent, on the AI-threat landscape |
+| **canon** | *(attestation layer — see below)* | verdicts + chain-of-custody + a machine-checkable claim of what's covered and what structurally isn't |
+| **agentwatch** | [adelic-ai/agentwatch](https://github.com/adelic-ai/agentwatch) | two-plane reconciliation of self-report vs. ground truth → `CONFIRMED / GAP / NONE` |
+| **Incus wizard** | **this repo** | the substrate: an isolated, egress-controlled, audited LLM runner |
+
+Each is usable on its own. warden (this repo) is the substrate **and** the narrative that
+assembles them — the [design doc](DESIGN.md) and the [3-view site](web/) tell the whole story.
+
+## Quickstart
+
+Requires a real `incus` on the host (Incus ≥ 7.x) and a btrfs storage pool.
+
+```
+python3 -m warden.cli up --flavor builder   --host local --llm claude  --project warden
+python3 -m warden.cli up --flavor monitored --host local --llm gemini  --project warden
+python3 -m warden.cli restore <instance>    --flavor monitored --llm gemini   # re-derives the audit rule (see below)
+python3 -m warden.cli down <instance>
+```
+
+`up`/`down`/`restore` need only the privilege the invoking user already has with `incus`
+(sudo, or membership in the host's `incus` group). Root is needed once, up front, for Incus
+install and the auditd/nftables wiring. Without a real `incus`, `up` fails fast rather than
+pretending to succeed. A Gemini API key (`--secret-file` or `GEMINI_API_KEY`) is injected as a
+container secret, never committed.
+
+## Status — measured, and honestly bounded
+
+**Validated on a real Incus host** (not a fake, not nested): the §4 acceptance passes 16/16 —
+unprivileged containers, no host disk, egress reaches the allowlisted LLM host but **not** the
+LAN or off-allowlist domains, auditd captures a marker exec at the derived uid range, and — the
+load-bearing one — **snapshot restore re-derives the audit rule and re-proves capture** (an
+idmap reallocation on restore silently blinds a frozen rule; deriving it every time is the fix).
+Idempotent and reversible. The real-host run surfaced six bugs a fake never could (egress that
+generated a ruleset nothing loaded; audit records fused by a reused serial; a restricted project
+that blocked its own snapshots).
+
+**agentwatch** ships Claude and Gemini adapters. False-positive side works structurally
+(CONFIRMED-on-benign **83 → 0** Claude, **34 → 0** Gemini, without over-allowlisting). Recall
+(the tool_call↔exec correlation) is validated for the shell-out case.
+
+**Honest limits — stated so no layer above certifies past them:**
+- Not calibrated. These are single-run measurements, not actuarial FP/FN rates.
+- The **fork gap**: `fork` without `exec` is invisible to execve-only audit — a real coverage
+  boundary, reported (via canon's fidelity attestations) as `missing-telemetry`, not hidden.
+- Gemini logs tool calls **name-only** unless `logPrompts` is on — reconciliation authorizes on
+  timestamp, not command-level claimed-vs-actual.
+- canon wiring emits verdicts at guarantee tier ≤ `well_formed` with calibration **absent** — it
+  refuses to claim a bound it hasn't earned.
+
+## What this is *not*
+
+- **Not a product.** A reference model / prototype.
+- **Detective, not preventive.** It stands up sandboxes and wires monitoring; it never blocks.
+  (Containment comes from the sandbox + egress lock; detection tells you what mattered.)
+- **Single host per invocation.** Fleet orchestration is future work.
 
 ## Layout
 
 ```
-warden/
-  idmap.py        derive-on-load + re-derive-on-restore (§1's load-bearing gotcha)
-  profiles.py      restricted project/profile config (§1 Incus-config gotchas)
-  egress.py        nftables default-drop bridge ACL generator
-  proxy.py         host-side CONNECT allowlist proxy (no in-guest interception)
-  auditd.py        persistent rule + dialect-tolerant/raw reader + marker-capture proof
-  flavors.py       the monitored/builder table (§2), one codepath
-  config.py        CLI-input -> resolved WardenConfig, LLM auth checks (§3)
-  incus.py         IncusClient protocol + subprocess-backed RealIncusClient
-  standing_rules.py  drops GEMINI.md/CLAUDE.md into the agent workdir (§3)
-  app.py           WardenApp — up/down orchestration, flavor-agnostic
-  cli.py           argparse entrypoint
-scripts/
-  install-incus-nested.sh   §5 setup: zabbly repo, incus admin init (btrfs pool + pinned bridge)
-  run-acceptance-nested.sh  §4 acceptance tests against a *real* nested Incus
-tests/
-  fakes.py            FakeIncusClient + FakeAuditReader
-  test_*.py           unit tests per module
-  test_acceptance.py  §4 test 1-4 against the fakes
+warden/          the wizard package (idmap derive-on-load + re-derive-on-restore, restricted
+                 project/profile config, egress via Incus network ACLs, host CONNECT-allowlist
+                 proxy, auditd rule + marker-capture proof, the two-flavor codepath, CLI)
+scripts/         install-incus-nested.sh (setup) · run-acceptance-nested.sh (the §4 tests)
+tests/           unit tests + the §4 acceptance against a FakeIncus double
+DESIGN.md        the full design doc
+web/             the 3-view site (overview · findings · design)
+DECISIONS.md     judgment calls, incl. the six real-host findings (D13–D20)
 ```
-
-## Running
-
-```
-python3 -m warden.cli up --flavor monitored --host local --llm gemini --project warden
-python3 -m warden.cli up --flavor builder   --host local --llm claude --project warden
-python3 -m warden.cli restore <instance-name> --flavor monitored --llm gemini  # I6-breaks-I5 fix
-python3 -m warden.cli down <instance-name>
-```
-
-Requires a real `incus` on PATH. `up`/`down`/`restore` themselves need no root beyond
-whatever the invoking user already has with `incus` (sudo, or membership in the host's
-`incus` group — §1's `gembox` operator model falls out of this for free, see DECISIONS.md).
-Root is only needed once, up front, for `scripts/install-incus-nested.sh` and for the
-auditd/nftables installers. Without a real `incus`, `up` fails fast with a clear
-`IncusNotFoundError` rather than pretending to succeed.
-
-## Tests
 
 ```
 python3 -m pytest tests/ -v
 ```
 
-64 tests, all passing in this VM. No external dependencies beyond `pytest` (already present
-in this VM's user site-packages). One marked `network` (`tests/test_proxy.py`'s live-TLS
-test) needs outbound connectivity; everything else is fully offline.
+## A note on canon
+
+canon is the attestation/provenance layer — it turns each agentwatch verdict into a
+SHACL-validated `detection_verdict` with a walkable PROV-O provenance chain, and turns
+agentwatch's structural limits into machine-checkable `fidelity_attestation`s. The wiring lives
+on the agentwatch side (canon stays a stable, context-agnostic contract). Its public face is
+being sorted out; until then, treat the attestation layer as described here and in `DESIGN.md`.
+
+---
+
+*Part of [adelic-ai](https://github.com/adelic-ai). Behavioral accountability for autonomous
+LLM agents — earned with measured reliability, not asserted.*
