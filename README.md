@@ -97,17 +97,20 @@ that blocked its own snapshots).
 (CONFIRMED-on-benign **83 → 0** Claude, **34 → 0** Gemini, without over-allowlisting). Recall
 (the tool_call↔exec correlation) is validated for the shell-out case.
 
-**The workload loop (`run` / `report` / `export`) is validated on fixtures; one real run is
-pending an API key.** The five verbs and all seven DEMO-SPEC §8 criteria pass against a FakeIncus
-double plus checked-in synthetic planes, and §8.4 is proven against canon's *real* API — every
-emitted verdict schema-validated, its provenance cid resolved to a PROV-O root and SHACL-checked
-`well_formed`, tiers not inflated, calibration absent. The privileged half of the split
-(`scripts/warden-collect-audit.sh`) has been exercised for real on a host against a scoped by-key
-auditd rule and parsed by agentwatch with zero skipped records. What has **not** run: Gemini CLI
-driven hands-off by `warden run` writing the telemetry the adapter expects, and a real audit rule
-capturing that run at the container's derived range. Any number from a report over a real run is
-therefore not yet measured — the fixture counts are properties of the fixture. See
-[NEEDS-HUMAN.md](NEEDS-HUMAN.md).
+**The workload loop (`run` / `report` / `export`) has run end to end on a real host**, in an
+isolated Incus project against Gemini CLI 0.53.1 with a real key: 24-minute hands-off work phase,
+1038 ground-truth execs with 0 unparsed records, 572 self-report events, marker capture proven at
+the re-derived idmap range, and a real work product (a branch, a module, 4 passing tests, a commit)
+exported and re-verified off-host. DEMO-SPEC §8 criteria 1, 2, 3, 5, 6 and 7 are met on real data.
+
+**And the honest headline is not "0 CONFIRMED".** It is `0 CONFIRMED over the 39 of 54 work-phase
+execs that were in scope` — the other 15, including *every* git command and the test run, were
+never evaluated at all, because Gemini CLI's shell tool forks a shell that never `execve`s and the
+ancestry walk ends there. That is the fork gap landing on the accountable actions. It is reported,
+named per-command in `report.json`, and carried as a canon fidelity attestation
+(`cause=missing-telemetry`) — not closed. Criterion §8.4 (verdict schema/SHACL/tier honesty) is
+**vacuously** met on real data, since the run emitted zero verdicts, and remains proven on fixtures
+against canon's real API. Full write-up: [DEMO-VALIDATION.md](DEMO-VALIDATION.md).
 
 **Honest limits — stated so no layer above certifies past them:**
 - Not calibrated. These are single-run measurements, not actuarial FP/FN rates.
@@ -139,6 +142,7 @@ tests/           unit tests, the §4 acceptance, and the DEMO-SPEC §8 acceptanc
                  FakeIncus double + checked-in synthetic planes
 DESIGN.md        the full design doc
 DEMO-SPEC.md     the workload demo spec (the five-command loop)
+DEMO-VALIDATION.md  the first real end-to-end run: what it proved, and what it exposed
 web/             the 3-view site (overview · findings · design)
 DECISIONS.md     judgment calls, incl. the six real-host findings (D13–D20) and the demo build
                  (D21–D27)
