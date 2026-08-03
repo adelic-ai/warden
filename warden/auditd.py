@@ -67,6 +67,8 @@ class AuditRuleInstaller(Protocol):
     see `RealAuditRuleInstaller` and NEEDS-HUMAN.md."""
 
     def install(self, instance: str, uid_range: "IdRange") -> None: ...
+    def uninstall(self, instance: str) -> None: ...
+    def prune(self, live_instances: set[str]) -> None: ...
 
 
 def rule_key(instance: str) -> str:
@@ -85,12 +87,27 @@ def generate_rule(uid_range: "IdRange", instance: str) -> str:
     everything inside them and wouldn't distinguish containers at all.
     See DECISIONS.md.
     """
+    return "".join(f"-a {' '.join(frag)}\n" for frag in rule_fragments(uid_range, instance))
+
+
+def rule_fragments(uid_range: "IdRange", instance: str) -> list[list[str]]:
+    """The same rules as `generate_rule`, as `auditctl` argv fragments.
+
+    Used to load and unload rules *individually, by key*. `augenrules
+    --load` is not used for the live load: it compiles every file in
+    `rules.d` and its output starts with `-D`, which would momentarily
+    wipe every audit rule on the host — including the unrelated
+    gemini-capsule build's ground-truth plane. The file in `rules.d` is
+    still written, so the rule survives a reboot; only the live load is
+    surgical. See DECISIONS.md "D15".
+    """
     key = rule_key(instance)
     lo, hi = uid_range.host_start, uid_range.host_end
-    return (
-        f"-a always,exit -F arch=b64 -S execve -F uid>={lo} -F uid<={hi} -k {key}\n"
-        f"-a always,exit -F arch=b32 -S execve -F uid>={lo} -F uid<={hi} -k {key}\n"
-    )
+    return [
+        ["always,exit", "-F", f"arch={arch}", "-S", "execve",
+         "-F", f"uid>={lo}", "-F", f"uid<={hi}", "-k", key]
+        for arch in ("b64", "b32")
+    ]
 
 
 def extract_marker(text: str) -> str | None:
@@ -139,6 +156,7 @@ def parse_events(text: str) -> list[AuditEvent]:
     interpolated `ausearch -i` dialect (local-time headers). Lines sharing
     an `audit(ts:serial)` id (SYSCALL carries uid, EXECVE carries argv) are
     merged into one event.
+
     """
     by_serial: dict[str, dict] = {}
     for line in text.splitlines():
@@ -176,36 +194,65 @@ def prove_capture(
     instance: str,
     uid_range: "IdRange",
     project: str = "default",
-    timeout: float = 5.0,
+    timeout: float = 20.0,
     poll_interval: float = 0.2,
     _sleep=time.sleep,
     _now=time.monotonic,
 ) -> AuditEvent:
     """Exec a marker inside `instance` and confirm the audit trail actually
-    captured it at `uid_range`. Raises `CaptureNotProvenError` on timeout —
-    that failure is the whole point of this function existing instead of
-    just checking `auditctl -l`.
+    captured it at `uid_range`, **under this instance's own rule key**.
+    Raises `CaptureNotProvenError` on timeout — that failure is the whole
+    point of this function existing instead of just checking `auditctl -l`.
+
+    The key check is not decoration. The first real-Incus run had a
+    deleted instance's rule still loaded with an identical uid range;
+    the kernel's exit filter stops at the first matching rule, so the new
+    instance's execs were tagged with the *dead* instance's key. Matching
+    on uid alone called that a pass while `ausearch -k <this instance>`
+    found nothing — a confident wrong answer, which is this build's
+    recurring failure shape. See DECISIONS.md "D14".
+
+    The timeout is generous because auditd's flush is not synchronous with
+    the exec: the capsule build twice diagnosed a working plane as broken
+    on a 2-3s wait.
     """
     argv, token = marker_argv()
+    expected_key = rule_key(instance)
     result = client.exec(instance, argv, project=project)
     if not result.ok:
         raise CaptureNotProvenError(
             f"{instance}: marker exec itself failed (rc={result.returncode}): {result.stderr}"
         )
 
+    near_miss: AuditEvent | None = None
     deadline = _now() + timeout
     while True:
         for event in source.poll():
-            if event.marker == token and event.uid is not None and uid_range.contains(event.uid):
-                return event
+            if event.marker != token:
+                continue
+            if event.uid is None or not uid_range.contains(event.uid):
+                near_miss = event
+                continue
+            if event.key != expected_key:
+                near_miss = event
+                continue
+            return event
         if _now() >= deadline:
             break
         _sleep(poll_interval)
 
+    detail = ""
+    if near_miss is not None:
+        detail = (
+            f" The marker WAS captured (uid={near_miss.uid}, key={near_miss.key!r}) but did not "
+            f"match this instance's rule (expected key {expected_key!r} in uid range {uid_range}). "
+            "A stale rule from a deleted instance with an overlapping uid range will do exactly "
+            "this — the kernel tags the exec with whichever matching rule it reaches first."
+        )
     raise CaptureNotProvenError(
         f"{instance}: marker {token!r} not observed in the audit trail for uid range "
-        f"{uid_range} within {timeout}s. Do not trust `auditctl -l` here — capture is "
-        "unproven, whatever the rule listing says."
+        f"{uid_range} under key {expected_key!r} within {timeout}s. Do not trust `auditctl -l` "
+        f"here — capture is unproven, whatever the rule listing says.{detail}"
     )
 
 
@@ -213,16 +260,104 @@ def prove_capture(
 # real (root-requiring) adapters — see NEEDS-HUMAN.md
 # ---------------------------------------------------------------------------
 
-class RealAuditRuleInstaller:
-    """Writes `/etc/audit/rules.d/60-warden-<instance>.rules` and reloads
-    via `augenrules --load`. Requires root; not exercised in this build
-    (see NEEDS-HUMAN.md) but written to be run by
-    `scripts/run-acceptance-nested.sh` once root is available."""
+class AuditRuleLoadError(RuntimeError):
+    """A rule was written but the kernel does not have it loaded."""
 
+
+class RealAuditRuleInstaller:
+    """Writes `/etc/audit/rules.d/60-warden-<instance>.rules` for
+    persistence and loads/unloads that instance's rules **by key** with
+    `auditctl`. Requires root.
+
+    Two failures from the first real-Incus run shaped this:
+
+    - `augenrules --load` is a no-op when the compiled ruleset is
+      byte-identical ("No change"), so a rule that is on disk but not in
+      the kernel stays that way. Nothing checked. Now the load is direct
+      and the result is verified against `auditctl -l`.
+    - `warden down` removed the instance but left its rule file behind.
+      The next instance to be allocated that freed uid range was captured
+      under the *dead* instance's key. `prune()` is the fix, and
+      `uninstall()` stops it happening in the first place.
+    """
+
+    RULE_FILE_GLOB = f"60-{RULE_KEY_PREFIX}-*.rules"
+
+    def __init__(self, rules_dir: str = "/etc/audit/rules.d"):
+        self.rules_dir = Path(rules_dir)
+
+    # -- helpers -----------------------------------------------------------
+    @staticmethod
+    def _loaded_lines() -> list[str]:
+        proc = subprocess.run(["auditctl", "-l"], capture_output=True, text=True)
+        if proc.returncode != 0:
+            return []
+        return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+
+    @classmethod
+    def _delete_loaded(cls, key: str) -> None:
+        """Delete only the rules carrying `key`, converting each listed
+        rule back into a `-d` spec. Never `auditctl -D`: this host also
+        carries the gemini-capsule build's rule, and wiping it would blind
+        an unrelated system's ground-truth plane."""
+        for line in cls._loaded_lines():
+            tokens = line.split()
+            if not any(t in (f"key={key}", key) for t in tokens):
+                continue
+            args, i = [], 0
+            while i < len(tokens):
+                tok = tokens[i]
+                if tok == "-a":
+                    args.append("-d")
+                elif tok == "-F" and i + 1 < len(tokens) and tokens[i + 1].startswith("key="):
+                    args += ["-k", tokens[i + 1][len("key="):]]
+                    i += 1
+                else:
+                    args.append(tok)
+                i += 1
+            subprocess.run(["auditctl", *args], capture_output=True, text=True)
+
+    @classmethod
+    def _is_loaded(cls, key: str) -> bool:
+        return any(
+            any(t in (f"key={key}", key) for t in line.split()) for line in cls._loaded_lines()
+        )
+
+    # -- protocol ----------------------------------------------------------
     def install(self, instance: str, uid_range: "IdRange") -> None:
-        path = Path(rule_file_path(instance))
-        path.write_text(generate_rule(uid_range, instance))
-        subprocess.run(["augenrules", "--load"], check=True)
+        key = rule_key(instance)
+        self.rules_dir.mkdir(parents=True, exist_ok=True)
+        # persistence across reboot
+        Path(rule_file_path(instance)).write_text(generate_rule(uid_range, instance))
+        # live load: replace whatever is currently loaded under this key,
+        # so a re-derived range after a restore actually takes effect
+        self._delete_loaded(key)
+        for fragment in rule_fragments(uid_range, instance):
+            proc = subprocess.run(["auditctl", "-a", *fragment], capture_output=True, text=True)
+            if proc.returncode != 0:
+                raise AuditRuleLoadError(
+                    f"auditctl -a for {instance} failed (rc={proc.returncode}): {proc.stderr.strip()}"
+                )
+        if not self._is_loaded(key):
+            raise AuditRuleLoadError(
+                f"{instance}: rule written to {rule_file_path(instance)} but key {key!r} is "
+                "not present in `auditctl -l` — the kernel does not have it"
+            )
+
+    def uninstall(self, instance: str) -> None:
+        self._delete_loaded(rule_key(instance))
+        Path(rule_file_path(instance)).unlink(missing_ok=True)
+
+    def prune(self, live_instances: set[str]) -> None:
+        """Drop rules for warden instances that no longer exist.
+
+        Covers the crash case as well as the clean one: a run that dies
+        between `incus delete` and `uninstall` leaves a rule file behind,
+        and the next `up` would otherwise inherit the shadowing bug."""
+        for path in self.rules_dir.glob(self.RULE_FILE_GLOB):
+            instance = path.name[len(f"60-{RULE_KEY_PREFIX}-"):-len(".rules")]
+            if instance and instance not in live_instances:
+                self.uninstall(instance)
 
 
 class RealEventSource:
