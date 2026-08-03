@@ -36,6 +36,11 @@ def build_parser() -> argparse.ArgumentParser:
     up.add_argument("--name", default=None, help="instance name; defaults to warden-<flavor>")
     up.add_argument("--allow", action="append", default=[], dest="extra_allow", metavar="DOMAIN")
     up.add_argument("--repo", default=None, dest="repo_url", help="repo to clone (builder only)")
+    up.add_argument(
+        "--audit", action="store_true",
+        help="wire the auditd ground-truth plane (already on for `monitored`; this is what "
+             "makes a `builder` reconcilable — `warden report` needs both planes)",
+    )
     up.add_argument("--secret-file", type=Path, default=None, help="gemini API key file")
     up.add_argument("--allowlist-file", type=Path, default=DEFAULT_ALLOWLIST_FILE)
     up.add_argument(
@@ -65,6 +70,11 @@ def build_parser() -> argparse.ArgumentParser:
     restore.add_argument("--llm", choices=["claude", "gemini"], required=True)
     restore.add_argument("--project", default="warden")
     restore.add_argument("--snapshot", default="clean")
+    # Must match the `up` that created the instance. A restore reallocates the
+    # idmap, so an audited builder restored without this flag would silently
+    # skip the re-derive-and-re-prove and leave the plane pointed at a dead
+    # range — the exact I6-breaks-I5 failure `restore` exists to prevent.
+    restore.add_argument("--audit", action="store_true")
 
     return parser
 
@@ -81,6 +91,7 @@ def _up(args: argparse.Namespace) -> int:
         cpu=args.cpu,
         extra_allow=args.extra_allow,
         repo_url=args.repo_url,
+        audit=args.audit,
     )
     try:
         # fail fast on a missing secret before touching the host at all
@@ -138,7 +149,10 @@ def _proxy(args: argparse.Namespace) -> int:
 
 
 def _restore(args: argparse.Namespace) -> int:
-    cfg = build_config(instance=args.instance, flavor=args.flavor, llm=args.llm, project=args.project)
+    cfg = build_config(
+        instance=args.instance, flavor=args.flavor, llm=args.llm,
+        project=args.project, audit=args.audit,
+    )
     client = RealIncusClient()
     app = WardenApp(
         client,

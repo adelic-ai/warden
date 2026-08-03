@@ -58,3 +58,21 @@ def test_restore_requires_flavor_and_llm():
     args = parser.parse_args(["restore", "cap-1", "--flavor", "monitored", "--llm", "gemini"])
     assert args.instance == "cap-1"
     assert args.snapshot == "clean"
+
+
+def test_up_audit_flag_defaults_off_and_sets():
+    parser = build_parser()
+    assert parser.parse_args(["up", "--flavor", "builder", "--llm", "gemini"]).audit is False
+    args = parser.parse_args(["up", "--flavor", "builder", "--llm", "gemini", "--audit"])
+    assert args.audit is True
+
+
+def test_restore_takes_audit_so_it_can_reprove_the_plane():
+    """A restore reallocates the idmap. Restoring an audited builder without
+    the flag would skip the re-derive-and-re-prove and leave the plane
+    pointed at a dead range — the I6-breaks-I5 failure `restore` exists for."""
+    parser = build_parser()
+    args = parser.parse_args(
+        ["restore", "cap-1", "--flavor", "builder", "--llm", "gemini", "--audit"]
+    )
+    assert args.audit is True

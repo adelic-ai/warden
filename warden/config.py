@@ -68,9 +68,10 @@ def build_config(
     cpu: str = "2",
     extra_allow: Iterable[str] = (),
     repo_url: str | None = None,
+    audit: bool = False,
 ) -> WardenConfig:
     flavor_enum = Flavor(flavor)
-    spec = resolve_flavor(flavor_enum, llm, extra_allow)
+    spec = resolve_flavor(flavor_enum, llm, extra_allow, audit=audit)
     return WardenConfig(
         instance=instance,
         flavor=flavor_enum,

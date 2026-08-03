@@ -348,3 +348,23 @@ Note the prior comment "the bridge's own subnet is deliberately absent [from LAN
 Also fixed in passing: `RealIncusClient.network_set` used the space-separated `<key> <value>` form,
 which Incus 7.x deprecates with a warning. Harmless until now; `ensure_substrate` calls it on every
 `up` as of this change, so it was made the supported `<key>=<value>` form.
+
+## D22 — `--audit` on `builder` is a flavor-table boolean, not a third flavor
+
+DEMO-SPEC §11.1. Reconciliation needs both planes; `builder` — the flavor that has a repo and a git
+history worth reconciling against — shipped `auditd_wired=False`, so `warden report` would have had
+a self-report plane and nothing to check it against.
+
+Kept as one boolean on the existing table rather than a `builder-audited` flavor or a branch in
+`app.py`, because that is what the data-driven flavor model is *for*: `app.py` already reads
+`cfg.spec.auditd_wired` and does the right thing. The test asserts the negative too — every other
+field of the spec is unchanged by the toggle — so this stays a config change rather than quietly
+becoming a second codepath.
+
+`restore` takes the flag as well. A restore reallocates the idmap, and an audited builder restored
+without it would skip the re-derive-and-re-prove and leave the ground-truth plane filtering a dead
+range while `auditctl -l` still looked correct — §1's I6-breaks-I5 gotcha, which is the whole reason
+`restore` is a warden verb instead of an `incus` invocation.
+
+On `monitored` the flag is a no-op rather than an error: asking for audit on something already
+audited is a reasonable thing to say.
