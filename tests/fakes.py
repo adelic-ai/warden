@@ -215,6 +215,14 @@ class FakeIncusClient:
         inst = self._require_instance(name, project)
         inst.config.setdefault("_files", {})  # type: ignore[arg-type]
         inst.config[f"_file:{remote_path}"] = content.decode()
+        inst.paths.add(remote_path)
+
+    def file_pull(self, name: str, remote_path: str, project: str = "default") -> bytes:
+        inst = self._require_instance(name, project)
+        key = f"_file:{remote_path}"
+        if key not in inst.config:
+            raise FileNotFoundError(f"{name}:{remote_path}")
+        return inst.config[key].encode()
 
     def snapshot(self, name: str, snapshot: str, project: str = "default") -> None:
         inst = self._require_instance(name, project)

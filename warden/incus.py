@@ -142,6 +142,7 @@ class IncusClient(Protocol):
     def file_push(
         self, name: str, content: bytes, remote_path: str, project: str = "default"
     ) -> None: ...
+    def file_pull(self, name: str, remote_path: str, project: str = "default") -> bytes: ...
     def snapshot(self, name: str, snapshot: str, project: str = "default") -> None: ...
     def restore(self, name: str, snapshot: str, project: str = "default") -> None: ...
     def delete(self, name: str, project: str = "default") -> None: ...
@@ -329,6 +330,31 @@ class RealIncusClient:
             input_bytes=content,
             timeout=LIFECYCLE_TIMEOUT,
         )
+
+    def file_pull(self, name: str, remote_path: str, project: str = "default") -> bytes:
+        """Read a file out of the instance, as **bytes**.
+
+        Bytes, not text, because `export` pulls a tar of the built repo through
+        here and a text-mode decode would corrupt it silently — the worst
+        available failure for an artifact whose whole job is to be verbatim.
+
+        `FileNotFoundError` for an absent guest path, so a caller can tell
+        "the agent produced no transcript" from "the pull broke", which are
+        very different things to report.
+        """
+        argv = [self._bin, "file", "pull", f"{name}/{remote_path}", "-", "--project", project]
+        try:
+            proc = subprocess.run(argv, capture_output=True, timeout=LIFECYCLE_TIMEOUT)
+        except FileNotFoundError:
+            raise IncusNotFoundError(self._bin) from None
+        except subprocess.TimeoutExpired:
+            raise IncusTimeoutError(argv, LIFECYCLE_TIMEOUT) from None
+        if proc.returncode != 0:
+            stderr = proc.stderr.decode(errors="replace")
+            if "not found" in stderr.lower() or "no such file" in stderr.lower():
+                raise FileNotFoundError(f"{name}:{remote_path}")
+            raise IncusCommandError(argv, proc.returncode, stderr)
+        return proc.stdout
 
     def snapshot(self, name: str, snapshot: str, project: str = "default") -> None:
         self._run_ok(

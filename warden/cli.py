@@ -14,12 +14,13 @@ from pathlib import Path
 
 from warden import profiles, workload
 from warden.app import ProvisioningError, WardenApp
-from warden.auditd import RealAuditRuleInstaller, RealEventSource
+from warden.auditd import CaptureNotProvenError, RealAuditRuleInstaller, RealEventSource
 from warden.config import NeedsHumanError, build_config, resolve_llm_auth
 from warden.example_prompt import EXAMPLE_PROMPT
 from warden.incus import IncusCommandError, IncusNotFoundError, RealIncusClient
 from warden.proxy import RealProxyAllowlistController, run_forever
-from warden.workload import MANIFEST_NAME, WorkloadError, WorkloadRunner, run_dir_for
+from warden.report import REPORT_NAME, ReportError, Reporter, render
+from warden.workload import MANIFEST_NAME, RunManifest, WorkloadError, WorkloadRunner, run_dir_for
 
 DEFAULT_ALLOWLIST_FILE = Path.home() / ".warden" / "allowlist.txt"
 DEFAULT_RUNS_DIR = Path.home() / ".warden" / "runs"
@@ -72,6 +73,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--timeout", type=float, default=workload.DEFAULT_WALL_CLOCK_SECONDS,
         help="wall-clock cap in seconds; a capped run is recorded as truncated, not as a failure",
     )
+
+    report = sub.add_parser(
+        "report",
+        help="reconcile what the agent said it did against the host's syscall record",
+    )
+    report.add_argument("--instance", default=None, help="defaults to warden-<flavor>")
+    report.add_argument("--flavor", choices=["monitored", "builder"], default="builder")
+    report.add_argument("--llm", choices=["claude", "gemini"], required=True)
+    report.add_argument("--project", default="warden")
+    report.add_argument("--audit", action="store_true", default=True,
+                        help="(implied — report requires the ground-truth plane)")
+    report.add_argument("--out", type=Path, default=DEFAULT_RUNS_DIR, help="host artifact root")
+    report.add_argument("--host", default=None, help="hostname recorded in verdicts; defaults to this host")
 
     down = sub.add_parser("down", help="remove a sandboxed instance (host substrate is unchanged)")
     down.add_argument("instance")
@@ -213,6 +227,49 @@ def _run(args: argparse.Namespace) -> int:
     return 0
 
 
+def _report(args: argparse.Namespace) -> int:
+    instance = args.instance or f"warden-{args.flavor}"
+    cfg = build_config(
+        instance=instance, flavor=args.flavor, llm=args.llm,
+        project=args.project, audit=True,
+    )
+    out = run_dir_for(args.out, cfg.project, cfg.instance)
+    manifest_path = out / MANIFEST_NAME
+    if not manifest_path.exists():
+        print(
+            f"error: no run manifest at {manifest_path} — run `warden run` first. "
+            "`report` scopes itself from the manifest and will not guess a window.",
+            file=sys.stderr,
+        )
+        return 1
+
+    reporter = Reporter(
+        RealIncusClient(),
+        event_source_factory=lambda inst: RealEventSource(inst),
+    )
+    try:
+        summary = reporter.report(cfg, RunManifest.load(manifest_path), out, host=args.host)
+    except IncusNotFoundError as exc:
+        print(f"NEEDS-HUMAN: {exc}", file=sys.stderr)
+        return 2
+    except CaptureNotProvenError as exc:
+        # The plane is not proven capturing. Refusing is the point: reporting a clean
+        # reconciliation over a blind plane is the confident-wrong-answer this build keeps
+        # digging out.
+        print(f"error: ground truth not proven — refusing to report over it: {exc}", file=sys.stderr)
+        return 1
+    except (IncusCommandError, ReportError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    (out / REPORT_NAME).write_text(summary.to_json())
+    print(render(summary))
+    print(f"\nartifacts: {out}")
+    if not summary.consistent:
+        return 1
+    return 0
+
+
 def _down(args: argparse.Namespace) -> int:
     client = RealIncusClient()
     # The audit installer is wired here too: `down` must take the
@@ -271,6 +328,8 @@ def main(argv: list[str] | None = None) -> int:
         return _up(args)
     if args.command == "run":
         return _run(args)
+    if args.command == "report":
+        return _report(args)
     if args.command == "down":
         return _down(args)
     if args.command == "restore":

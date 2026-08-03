@@ -413,3 +413,73 @@ run with one keeps the two separate.
 `RUN_MANIFEST_SCHEMA_VERSION` is checked on load and refuses a version it does not speak, per
 §10's "keep the outputs schema-stable and versioned — they are the eventual input to the cohort and
 calibration layers".
+
+## D24 — `warden report`: what warden contributes, and the three places it refuses
+
+DEMO-SPEC §4/§11.3. This is glue, and keeping it glue is a decision: every reconciliation call is
+agentwatch's (`run_once`, the reconcilers, `canon_emit`), every custody call is canon's. warden
+contributes only the four things agentwatch cannot know — which uid to scope to, proof the plane is
+live, where the phase boundary is, and the privilege split.
+
+### It refuses rather than reporting something plausible, in three places
+
+**No ground-truth plane** — an instance created without `--audit` has a self-report plane and
+nothing to check it against. Reporting over that would be "trusting the thing you're supposed to be
+watching", which is DESIGN §0's opening line as a failure mode.
+
+**Capture not proven** — a marker exec must be captured under *this instance's own key* before the
+plane is trusted at all. `auditctl -l` proves a rule is loaded text, not that it matches; D14 had a
+deleted instance's rule with an overlapping uid range tagging a live instance's execs under the
+dead key, and uid-only matching called that a pass.
+
+**Idmap reallocated between `run` and `report`** — a restore moves the range. The run's records
+carry the OLD host uids and the live rule watches the new ones, so *neither* value reconciles that
+run: the new range matches none of the run's records and reads as a beautifully clean run, and the
+old range is the frozen value §1 exists about. There is no third option that is honest, so it
+stops. §8.7's "re-derived, not frozen" is satisfied by deriving here and comparing, not by picking.
+
+### The phase split has three windows, not two
+
+§1 asks for provisioning vs. work. There is a third, and leaving it out would have quietly
+inflated the accountable one: `after_run` holds warden's **own** capture-proof marker exec, which
+`report` runs at report time. The observer's footprint must not be counted inside the window it is
+observing.
+
+Related, and initially wrong in the design: provisioning noise does not stay out of the work phase
+because of the phase split. It stays out because `RuntimeScope` excludes anything outside the
+agent's session subtree — `apt-get`/`npm` are not descendants of the agent runtime, so they are
+never evaluated. The phase split's real job is to make that *visible*: `not_evaluated` is reported
+**per phase**, because "47 unevaluated execs, all in the provisioning window" and "47 unevaluated
+execs in the work window" mean opposite things, and one number cannot distinguish them.
+
+### The one duplication is a cross-check
+
+`run_once` must own `findings.jsonl`/`verdicts.jsonl` or their schema drifts from agentwatch's
+(§10). But it returns only *newly written* findings, and the summary needs the whole candidate
+population including the ones that were correctly silent. So the candidate pass runs here too, over
+the same two files. Rather than accept that as duplication, `Summary.consistent` asserts the two
+agree and the CLI exits non-zero if they do not — a disagreement means one pass is wrong, and the
+report says so instead of printing a confident number.
+
+### `findings.jsonl` is touched; `verdicts.jsonl` is not
+
+A clean run writes no findings, and `FindingsStore` only creates the file on append — so a
+genuinely clean reconciliation and a report that never ran are byte-identical on disk (both: no
+file). An empty file says "I looked and found nothing". `verdicts.jsonl` is deliberately *not*
+touched when canon is unavailable, because an empty verdicts file would imply the canon projection
+ran and produced none — a different claim from "canon was not importable here", which is what
+`verdicts_unavailable_reason` says instead.
+
+### The honesty bar is data in the artifact, not prose in a README
+
+`report.json` carries `calibrated: false`, `analysis_engine: false`,
+`recall_validated_for: "shell-out only"`, `guarantee_tier_max: "well_formed"` and
+`calibration_field: "absent"` as fields. A README nobody exports is not a caveat; a field in the
+file that travels with the data is. The verdict kinds are separate fields with no total that fuses
+them, and the test asserts the *keys* — no `deviation`, `risk_score`, `severity_total` anywhere.
+
+### The collector refuses a non-`warden-*` key
+
+It runs as root via a sudo rule, so a caller that could choose an arbitrary key could read any
+audit stream on the host — a wider grant than the privilege split intends. It only ever reads, and
+never `auditctl -D`: a co-located capsule build has its own rule here.
