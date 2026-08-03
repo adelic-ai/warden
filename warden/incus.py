@@ -227,7 +227,11 @@ class RealIncusClient:
         self._run_ok(["project", "unset", name, key])
 
     def network_set(self, name: str, key: str, value: str) -> None:
-        self._run_ok(["network", "set", name, key, value])
+        # `key=value`, not `key value`: Incus 7.x warns the space-separated
+        # form is deprecated, and `ensure_substrate` now calls this on every
+        # `up` to converge the bridge subnet — a call site that has to keep
+        # working. `profile_device_set` already used the supported form.
+        self._run_ok(["network", "set", name, f"{key}={value}"])
 
     def profile_device_set(
         self, profile: str, project: str, device: str, key: str, value: str

@@ -292,3 +292,59 @@ decorative — a bound that a caller can outlive is not a bound.
 creates-or-verifies the pool (btrfs), with a `--pool` flag for operators who want their own.
 Consistent with the bridge: the substrate `up` depends on is either verified or created, not
 assumed.
+
+## D21 — the default bridge subnet was Tailscale-hostile (100.89.0.1/24 → 172.29.0.1/24)
+
+**Finding, reported by the operator before the first `warden up` of the demo build.** The pinned
+bridge subnet `100.89.0.1/24` sits inside `100.64.0.0/10` — RFC 6598 CG-NAT, which is the range
+**Tailscale allocates every node from** and routes as a whole. A managed Incus bridge with a `/24`
+inside it is the more specific route, so it wins: every tailnet peer addressed in `100.89.x`
+becomes unreachable from this host, and an operator driving warden *over* the tailnet can lose the
+connection they are driving it over.
+
+The original reasoning is in the old comment, and it is worth keeping visible because it was
+careful and still wrong: CG-NAT was chosen precisely *because* it is "unlikely to be in use on a
+host's LAN, unlike 10.0.0.0/8 or 192.168.0.0/16". That is true and irrelevant. The check considered
+the physical LAN and not the overlay networks a host also routes — and an overlay is exactly the
+thing that claims a range no LAN uses.
+
+**Nothing in warden could have noticed.** The bridge comes up, the ACL applies, the containers get
+egress, every test passes. The damage is entirely off-box, on a plane warden does not observe.
+Measured on the pop-os validation host at the time of the report: `tailscale0` at `100.120.63.5/32`,
+and `100.89.0.0/24 dev wardenbr0 ... linkdown` already installed in the main routing table — latent
+only because no instance had carrier yet.
+
+Three parts to the fix, because the first alone would have been decorative:
+
+1. **The constant** is now `172.29.0.1/24` — RFC 1918, clear of CG-NAT and of Incus's own
+   `incusbr0` (10.234.56.0/24 on this host).
+2. **`profiles.assert_subnet_sane`** raises on any bridge subnet inside `100.64.0.0/10`. A comment
+   would not have prevented this; the previous value was chosen *by* reasoning about ranges. It is
+   deliberately narrow — it names the one range that is by convention always someone else's, and
+   does not attempt to enumerate every overlay a host might run.
+3. **`ensure_substrate` converges the bridge**, the same way it already converges project config. A
+   bridge created by an older warden keeps the address it was created with, so changing the
+   constant would have left every already-provisioned host — including this one — still hijacking
+   the tailnet while the code claimed to be fixed.
+
+### The carve-out this forced, and the guard that caught it
+
+Moving out of CG-NAT put the bridge *inside* `172.16.0.0/12`, which is one of the LAN drops. On
+this Incus, specific drops outrank broad allows (capsule T8), so the drop would have shadowed the
+`/32` allows for the proxy and resolver and left the container with **no egress at all**.
+`egress.assert_enforceable` refused the document immediately — the guard written for a footgun this
+build had already hit caught a *different* instance of it, introduced by an unrelated change. That
+is the argument for structural guards over comments, made without anyone having to make it.
+
+`egress.lan_drops` now subtracts the bridge network from whichever private range contains it, via
+exact `address_exclude` rather than dropping the containing `/12` wholesale — dropping RFC 1918 is
+the point of the rule, and discarding ~1M addresses to make one `/24` reachable would trade a
+broken container for a quiet hole. Output is sorted so the ACL document is byte-stable and
+`ensure_substrate` does not rewrite it on every run.
+
+Note the prior comment "the bridge's own subnet is deliberately absent [from LAN_DROPS]" was true
+*by accident*: CG-NAT is not an RFC 1918 range, so nothing had to enforce it. It is enforced now.
+
+Also fixed in passing: `RealIncusClient.network_set` used the space-separated `<key> <value>` form,
+which Incus 7.x deprecates with a warning. Harmless until now; `ensure_substrate` calls it on every
+`up` as of this change, so it was made the supported `<key>=<value>` form.
