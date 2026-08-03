@@ -157,15 +157,28 @@ def parse_events(text: str) -> list[AuditEvent]:
     an `audit(ts:serial)` id (SYSCALL carries uid, EXECVE carries argv) are
     merged into one event.
 
+    The merge key is the **whole `ts:serial` id, never the serial alone**.
+    The kernel's serial counter restarts from zero at every boot while
+    `/var/log/audit/audit.log` persists across boots, so a serial is only
+    unique *within* a boot. Measured on this host: 27 counter resets and
+    two serials living under two timestamps ~28h apart in the current log.
+
+    Merging on the serial alone silently fuses those unrelated events into
+    one, and since each field is taken from the first record that carries
+    it, the fused event can pair a real marker with a `uid` and `key`
+    lifted from a different event entirely — i.e. report capture proven
+    for a rule that captured nothing. That is the exact failure shape this
+    module exists to catch, so it must not be the way it fails.
     """
-    by_serial: dict[str, dict] = {}
+    by_event: dict[str, dict] = {}
     for line in text.splitlines():
         m = _AUDIT_MSG_RE.search(line)
         if not m:
             continue
         ts_part, serial = _split_ts_serial(m.group(1))
-        rec = by_serial.setdefault(
-            serial, {"ts": _parse_ts(ts_part), "uid": None, "key": None, "marker": None, "raw": []}
+        rec = by_event.setdefault(
+            f"{ts_part}:{serial}",
+            {"ts": _parse_ts(ts_part), "uid": None, "key": None, "marker": None, "raw": []},
         )
         rec["raw"].append(line)
         uid_m = _UID_RE.search(line)
@@ -180,7 +193,7 @@ def parse_events(text: str) -> list[AuditEvent]:
 
     return [
         AuditEvent(ts=r["ts"], uid=r["uid"], key=r["key"], marker=r["marker"], raw="\n".join(r["raw"]))
-        for r in by_serial.values()
+        for r in by_event.values()
     ]
 
 

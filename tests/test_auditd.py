@@ -68,6 +68,47 @@ def test_parse_tolerates_unrecognized_timestamp_dialect():
     assert events[0].marker == "WARDEN_MARKER_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 
+def test_parse_does_not_fuse_events_that_reuse_a_serial():
+    """The kernel's audit serial counter restarts at every boot while
+    audit.log persists across boots, so a serial is unique only *within* a
+    boot. The live host's log has 27 counter resets and serials appearing
+    under two timestamps ~28h apart.
+
+    Merging on the serial alone fuses those unrelated events, and because
+    each field is taken from the first record carrying it, the fused event
+    pairs a genuine marker with a uid and key lifted from somewhere else —
+    `prove_capture` then reports capture proven for a rule that captured
+    nothing. Exactly the confidently-wrong answer it exists to prevent.
+    """
+    text = (
+        # boot A, serial 456: an unrelated event that happens to carry the
+        # key and an in-range uid (e.g. the CONFIG_CHANGE from rule load)
+        'type=CONFIG_CHANGE msg=audit(1690000000.100:456): op=add_rule '
+        'key="warden-cap-1" uid=1000042 res=1\n'
+        # boot B, serial 456 again: the real marker exec, captured under a
+        # DIFFERENT key and a uid outside the range — i.e. not our capture
+        'type=SYSCALL msg=audit(1790000000.500:456): syscall=59 uid=99 '
+        'key="someone-elses-rule"\n'
+        'type=EXECVE msg=audit(1790000000.500:456): argc=2 a0="/bin/echo" '
+        'a1="WARDEN_MARKER_deadbeefdeadbeefdeadbeefdeadbeef"\n'
+    )
+    events = parse_events(text)
+    assert len(events) == 2, "records from different events must not be merged"
+
+    marker_events = [e for e in events if e.marker is not None]
+    assert len(marker_events) == 1
+    # The marker keeps its OWN uid and key, not the other event's.
+    assert marker_events[0].uid == 99
+    assert marker_events[0].key == "someone-elses-rule"
+
+    # And so the fused false positive is impossible: nothing in this trail
+    # is both in-range and marker-bearing.
+    rng = IdRange(1_000_000, 65536)
+    assert not any(
+        e.marker is not None and e.uid is not None and rng.contains(e.uid) for e in events
+    )
+
+
 def test_prove_capture_succeeds_against_fake_trail():
     client = FakeIncusClient(first_host_uid=1_000_000)
     client.projects["warden"] = {}
