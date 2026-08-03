@@ -368,3 +368,48 @@ range while `auditctl -l` still looked correct — §1's I6-breaks-I5 gotcha, wh
 
 On `monitored` the flag is a no-op rather than an error: asking for audit on something already
 audited is a reasonable thing to say.
+
+## D23 — `warden run`: the phase boundary is drawn before the work window, not inside it
+
+DEMO-SPEC §3/§11.2. Three judgment calls, all of which would have been invisible if made the other
+way.
+
+**Installing the agent CLI is provisioning, so it happens before `started_at`.** §1 splits `run`
+into provisioning (clone, install, env prep — actions that often have no authorizing tool call and
+are *expected*) and work (the accountable phase). The agent CLI is not installed by `up` at all:
+`_provision` installs git and ca-certificates and nothing else, and `deb.nodesource.com` sits in
+the builder's *provisioning* allowlist and deliberately not in its runtime one. So `run` installs
+it, widening to the provisioning allowlist and narrowing back **before** the agent runs — the same
+D13 discipline `up` follows, and the narrow-back is in a `finally` so a failed install cannot leave
+the wide list active. Had installation landed inside the work window, several hundred `npm`/`dpkg`
+execs that no tool call authorizes would flood the accountable phase, and the demo would be
+presenting reconciliation noise as reconciliation.
+
+**The secret never enters an argv, on either side.** `incus exec --env K=V` puts the value in the
+*host's* `incus` argv (visible to `ps`); building `sh -c "K=$KEY …"` on the host puts it in the
+guest's. So the key is pushed into the instance as bytes — read, never decoded, never formatted
+into a message — and dereferenced *inside* the guest by a `$(cat …)` that is literal text in every
+argv that exists. auditd captures syscall arguments and not environments, so the key is absent from
+the ground-truth plane **by construction rather than by redaction**. `resolve_llm_auth` returns a
+description of where the secret came from, and the description is what the manifest records. The
+test asserts the material appears in no argv and in no manifest.
+
+Same reasoning applies to the **prompt**, for a different failure: it is pushed as a file and read
+with `"$(cat …)"` rather than interpolated, so a prompt containing a quote cannot rewrite the shell
+command. That is a bug class warden should not have.
+
+**The manifest records the derived idmap; it is not a source for it.** The range is derived at run
+time so the record of the run is complete, and `report` derives it *again* rather than reading it
+back. §1's never-freeze-the-idmap rule has already been violated three times by exactly this shape
+— a plausible-looking cache — and a manifest is the most plausible one yet.
+
+Smaller calls: a non-zero *agent* exit is recorded, not raised — an agent that failed at its task
+still produced a transcript and a trace, and that run is still reportable. A wall-clock cap is
+recorded as `timed_out` rather than swallowed, because a capped run's trace is truncated and a
+reader has to know that before drawing conclusions from what is missing. `WORKDIR` is `/root/work`,
+not `up --repo`'s `/root/repo`, so a run with no `--repo` still has a git history to export and a
+run with one keeps the two separate.
+
+`RUN_MANIFEST_SCHEMA_VERSION` is checked on load and refuses a version it does not speak, per
+§10's "keep the outputs schema-stable and versioned — they are the eventual input to the cohort and
+calibration layers".

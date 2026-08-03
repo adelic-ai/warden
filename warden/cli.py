@@ -12,14 +12,17 @@ import argparse
 import sys
 from pathlib import Path
 
-from warden import profiles
+from warden import profiles, workload
 from warden.app import ProvisioningError, WardenApp
 from warden.auditd import RealAuditRuleInstaller, RealEventSource
 from warden.config import NeedsHumanError, build_config, resolve_llm_auth
+from warden.example_prompt import EXAMPLE_PROMPT
 from warden.incus import IncusCommandError, IncusNotFoundError, RealIncusClient
 from warden.proxy import RealProxyAllowlistController, run_forever
+from warden.workload import MANIFEST_NAME, WorkloadError, WorkloadRunner, run_dir_for
 
 DEFAULT_ALLOWLIST_FILE = Path.home() / ".warden" / "allowlist.txt"
+DEFAULT_RUNS_DIR = Path.home() / ".warden" / "runs"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -46,6 +49,28 @@ def build_parser() -> argparse.ArgumentParser:
     up.add_argument(
         "--pool", default=profiles.STORAGE_POOL,
         help="storage pool; created (btrfs) if absent",
+    )
+
+    run = sub.add_parser(
+        "run",
+        help="run the agent hands-off against a single prompt, to completion or a wall-clock cap",
+    )
+    run.add_argument("prompt", nargs="?", default=None, help="the prompt; omit with --example")
+    run.add_argument(
+        "--example", action="store_true",
+        help="use the shipped example prompt (a small, real, unrigged build — DEMO-SPEC §6)",
+    )
+    run.add_argument("--instance", default=None, help="defaults to warden-<flavor>")
+    run.add_argument("--flavor", choices=["monitored", "builder"], default="builder")
+    run.add_argument("--llm", choices=["claude", "gemini"], required=True)
+    run.add_argument("--project", default="warden")
+    run.add_argument("--audit", action="store_true", help="must match the `up` that created it")
+    run.add_argument("--secret-file", type=Path, default=None, help="gemini API key file")
+    run.add_argument("--allowlist-file", type=Path, default=DEFAULT_ALLOWLIST_FILE)
+    run.add_argument("--out", type=Path, default=DEFAULT_RUNS_DIR, help="host artifact root")
+    run.add_argument(
+        "--timeout", type=float, default=workload.DEFAULT_WALL_CLOCK_SECONDS,
+        help="wall-clock cap in seconds; a capped run is recorded as truncated, not as a failure",
     )
 
     down = sub.add_parser("down", help="remove a sandboxed instance (host substrate is unchanged)")
@@ -126,6 +151,68 @@ def _up(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run(args: argparse.Namespace) -> int:
+    if bool(args.prompt) == bool(args.example):
+        print(
+            "error: give exactly one of a prompt argument or --example", file=sys.stderr
+        )
+        return 2
+    prompt = EXAMPLE_PROMPT if args.example else args.prompt
+    prompt_source = "example" if args.example else "argument"
+
+    instance = args.instance or f"warden-{args.flavor}"
+    cfg = build_config(
+        instance=instance, flavor=args.flavor, llm=args.llm,
+        project=args.project, audit=args.audit,
+    )
+    try:
+        # Fail before touching the instance, and before the wide provisioning
+        # allowlist goes up — same fail-fast order as `up`.
+        resolve_llm_auth(args.llm, secret_file=args.secret_file)
+    except NeedsHumanError as exc:
+        print(f"NEEDS-HUMAN: {exc}", file=sys.stderr)
+        return 2
+
+    runner = WorkloadRunner(
+        RealIncusClient(),
+        proxy_controller=RealProxyAllowlistController(
+            args.allowlist_file, bind=profiles.BRIDGE_GATEWAY, port=profiles.PROXY_PORT
+        ),
+    )
+    try:
+        manifest = runner.run(
+            cfg, prompt,
+            prompt_source=prompt_source,
+            secret_file=args.secret_file,
+            wall_clock_seconds=args.timeout,
+        )
+    except IncusNotFoundError as exc:
+        print(f"NEEDS-HUMAN: {exc}", file=sys.stderr)
+        return 2
+    except (IncusCommandError, WorkloadError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    out = run_dir_for(args.out, cfg.project, cfg.instance)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / MANIFEST_NAME).write_text(manifest.to_json())
+    elapsed = manifest.ended_at - manifest.started_at
+    print(
+        f"run: {cfg.instance} llm={manifest.llm}{'/' + manifest.llm_version if manifest.llm_version else ''} "
+        f"rc={manifest.returncode}{' TIMED-OUT' if manifest.timed_out else ''} "
+        f"work-phase={elapsed:.1f}s uid-scope={manifest.idmap_uid_start}-{manifest.idmap_uid_end}"
+    )
+    print(f"run: manifest -> {out / MANIFEST_NAME}")
+    if manifest.returncode != 0:
+        # Not an error exit: an agent that failed at its task still produced a
+        # transcript and a trace, and that run is still reportable.
+        print(
+            f"run: the agent exited {manifest.returncode} — the run is still reportable",
+            file=sys.stderr,
+        )
+    return 0
+
+
 def _down(args: argparse.Namespace) -> int:
     client = RealIncusClient()
     # The audit installer is wired here too: `down` must take the
@@ -182,6 +269,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "up":
         return _up(args)
+    if args.command == "run":
+        return _run(args)
     if args.command == "down":
         return _down(args)
     if args.command == "restore":
