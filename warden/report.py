@@ -166,6 +166,18 @@ class PhaseCounts:
     #: NONE reasons, counted. This is what makes a NONE readable as a *blind spot* rather than a
     #: silent pass — "the plane structurally cannot observe this" is a claim that must name itself.
     none_reasons: dict = field(default_factory=dict)
+    #: `comm` -> count for the execs the reconciler never judged. Added after the first real run,
+    #: which made the case unanswerably: the work phase reported "not evaluated 15", and those 15
+    #: turned out to be `git init` / `git checkout -b` / `git add` / `git commit` / `python3 -m
+    #: unittest` — i.e. **the entire work product**. Their parent shells forked without ever
+    #: execve'ing, so the ancestry walk terminated before reaching the runtime pid and the whole
+    #: subtree fell out of scope (the fork gap, agentwatch G23).
+    #:
+    #: The count alone was true and useless. A reader seeing "0 CONFIRMED, 15 not evaluated" would
+    #: reasonably conclude the run was clean and the remainder was noise, when in fact the actions
+    #: that produced the commits were the unexamined ones. Naming them is the difference between
+    #: disclosing a blind spot and merely not lying about it.
+    not_evaluated_by_comm: dict = field(default_factory=dict)
 
     @property
     def evaluated(self) -> int:
@@ -468,6 +480,16 @@ class Reporter:
                 candidate.reason,
                 matched=not candidate.is_orphan,
             )
+        # Name the unevaluated remainder. `(ts, pid)` rather than pid alone: a pid can execve more
+        # than once (a PATH search records the failed attempt and then the successful one), and
+        # keying on the pid would mark the second exec evaluated because the first was.
+        judged = {(c.event.ts, c.event.pid) for c in candidates}
+        for ev in gt_events:
+            if ev.kind != EXEC or ev.uid != agent_uid or (ev.ts, ev.pid) in judged:
+                continue
+            counts = phases[phase_of(ev.ts)].not_evaluated_by_comm
+            name = ev.comm or (ev.exe or "?").rsplit("/", 1)[-1]
+            counts[name] = counts.get(name, 0) + 1
         not_evaluated = sum(p.not_evaluated for p in phases.values())
 
         # --- cross-check, not decoration --------------------------------------
@@ -600,7 +622,18 @@ def render(summary: Summary) -> str:
             add(f"                     {n}x {reason}")
         add(f"      GAP            {counts.get('gap', 0)}   entailed counterpart absent on a collected channel")
         add(f"    not evaluated    {counts.get('not_evaluated', 0)}   outside the agent's session "
-            "subtree (reported, not dropped — an unevaluated exec is not a clean one)")
+            "subtree — NOT judged either way")
+        by_comm = counts.get("not_evaluated_by_comm", {})
+        for name, n in sorted(by_comm.items(), key=lambda kv: -kv[1])[:12]:
+            add(f"                     {n}x {name}")
+        if by_comm and phase == PHASE_WORK:
+            # The lesson of the first real run, printed where it is needed rather than filed in a
+            # design doc: these are work-phase actions with no verdict at all, and a reader who
+            # skims "0 CONFIRMED" needs to see that before drawing a conclusion from it.
+            add("                     ^ these were never reconciled. A forked parent that never")
+            add("                       execve'd breaks the ancestry walk, so its whole subtree")
+            add("                       falls out of scope — the fork gap. Absence of a CONFIRMED")
+            add("                       here is absence of evidence, not evidence of absence.")
 
     add("")
     add(f"  artifacts    findings: {summary.findings_written} new · verdicts: {summary.verdicts_written}")
