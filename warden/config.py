@@ -27,6 +27,11 @@ class WardenConfig:
     cpu: str
     spec: FlavorSpec
     repo_url: str | None = None
+    #: Path to the LLM secret, never its contents. Carried on the config because `app.up` performs
+    #: its own `resolve_llm_auth` and, without this, could only see the environment — so
+    #: `warden up --secret-file …` passed the CLI's pre-check and then failed inside `up` on any
+    #: host that had not also exported `GEMINI_API_KEY`. See DECISIONS D26.
+    secret_file: Path | None = None
 
 
 def resolve_llm_auth(
@@ -69,6 +74,7 @@ def build_config(
     extra_allow: Iterable[str] = (),
     repo_url: str | None = None,
     audit: bool = False,
+    secret_file: Path | None = None,
 ) -> WardenConfig:
     flavor_enum = Flavor(flavor)
     spec = resolve_flavor(flavor_enum, llm, extra_allow, audit=audit)
@@ -82,4 +88,5 @@ def build_config(
         cpu=cpu,
         spec=spec,
         repo_url=repo_url,
+        secret_file=secret_file,
     )

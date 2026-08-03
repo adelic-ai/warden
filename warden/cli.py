@@ -140,6 +140,7 @@ def _up(args: argparse.Namespace) -> int:
         extra_allow=args.extra_allow,
         repo_url=args.repo_url,
         audit=args.audit,
+        secret_file=args.secret_file,
     )
     try:
         # fail fast on a missing secret before touching the host at all
@@ -186,7 +187,7 @@ def _run(args: argparse.Namespace) -> int:
     instance = args.instance or f"warden-{args.flavor}"
     cfg = build_config(
         instance=instance, flavor=args.flavor, llm=args.llm,
-        project=args.project, audit=args.audit,
+        project=args.project, audit=args.audit, secret_file=args.secret_file,
     )
     try:
         # Fail before touching the instance, and before the wide provisioning

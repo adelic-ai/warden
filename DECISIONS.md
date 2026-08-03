@@ -506,3 +506,52 @@ machine is not a caveat; one that travels with the data is.
 The archive name is derived from the run's own clock, so two exports of one run produce one path
 rather than a pile of near-identical tarballs. Members are rooted in a single directory — an
 archive that explodes into the reader's cwd is a hostile artifact.
+
+## D26 — `warden up --secret-file` passed its own pre-check and then failed inside `up`
+
+Found by writing the §8 acceptance loop, which is the first thing to drive `up` and `run` in
+sequence with a secret file and no `GEMINI_API_KEY` in the environment.
+
+`cli._up` called `resolve_llm_auth(llm, secret_file=args.secret_file)` as a fail-fast pre-check —
+correctly — and then `app.up(cfg)` called `resolve_llm_auth(cfg.llm)` again with **no secret_file**,
+because the flag lived only on the argparse namespace. On any host that had not also exported
+`GEMINI_API_KEY`, that second call raised `NeedsHumanError` *after* the pre-check had passed. The
+flag was, in practice, only useful to people who did not need it.
+
+Two things made this survive review. The pre-check reads like the check, so the second call looks
+redundant rather than differently-parameterised. And every existing test that exercises `up` with
+gemini either sets the environment variable or uses claude (whose `resolve_llm_auth` takes neither
+path). Nothing was wrong with the second call existing — `app.up` should not trust its caller to
+have validated — it was wrong that it could not see what the caller had validated *with*.
+
+Fixed by carrying `secret_file` on `WardenConfig`: the path, never the material, and `repr` of a
+config is safe to log. Both calls now check the same thing.
+
+## D27 — §8 acceptance, and exactly which half is modelled
+
+`tests/test_demo_acceptance.py` walks DEMO-SPEC §8's seven criteria against `FakeIncusClient` plus
+the checked-in synthetic planes — the same arrangement `test_acceptance.py` uses for the wizard's
+§4, for the same reason (no real host in the loop here).
+
+The file says in its docstring which half is not proven, and the loop marks the substitution
+inline rather than letting the fake quietly manufacture it:
+
+  * that Gemini CLI driven with `--skip-trust -p` runs hands-off to completion and writes the
+    telemetry file the adapter expects — **unproven**, needs a real host and a key;
+  * that a real auditd rule captures that run's execs at the derived range — **unproven**, same.
+
+Everything else is proven here, and one thing is proven *for real* rather than modelled: §8.4. The
+verdicts warden actually writes are validated against canon's own
+`detection_verdict.schema.json`, their provenance cids are resolved back to PROV-O roots and
+SHACL-validated against `well_formed` + the detection shapes, and the tiers/calibration gate is
+asserted over the emitted contracts. That check runs against the real canon API or it skips; it is
+never simulated.
+
+The example prompt gets an assertion of its own (§6/§7): the shipped text must contain a real build
+(`git init`, `unittest`, `commit`) and must NOT contain the words that would indicate a staged
+gotcha (`&`, `nohup`, `background`, `curl`, `wget`, `fork`). A later "improvement" that plants a
+fork gap so the demo can catch it now fails a test, which is the only durable way to hold §7's line
+on a file that looks harmless to edit.
+
+The loop runs in project `wardendemo`, never `warden`, and asserts the `warden` project stays
+empty — a demo must not share a project with a co-located capsule build.

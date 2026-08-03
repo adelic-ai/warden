@@ -220,7 +220,11 @@ class WardenApp:
 
     # -- up -----------------------------------------------------------------
     def up(self, cfg: WardenConfig) -> UpResult:
-        resolve_llm_auth(cfg.llm)  # raises NeedsHumanError if a real run can't proceed
+        # Raises NeedsHumanError if a real run can't proceed. The secret FILE is checked, not just
+        # the environment: `warden up --secret-file …` passed the CLI's pre-check and then failed
+        # here on any host without `GEMINI_API_KEY` also exported, because this call could not see
+        # the flag. See DECISIONS D26.
+        resolve_llm_auth(cfg.llm, secret_file=cfg.secret_file)
 
         self.ensure_substrate(cfg)
 
