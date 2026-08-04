@@ -81,8 +81,15 @@ for e in clones:
     assert e.pid is not None and e.ppid is not None, f"clone with missing pid/ppid: {e}"
 print(f"  parsed {len(clones)} CLONE events, each with a child(pid)+parent(ppid)")
 
-g = next((e for e in events if e.kind == EXEC and any(marker in (a or "") for a in e.args)), None)
-assert g is not None, f"marker exec {marker!r} not found among the execve events"
+# Select the marker's ECHO specifically. The marker is also in python3's argv (it's passed as an
+# arg to the workload), and python3 attaches straight to the calling shell - matching it instead
+# of the echo would find no bridge. Require comm/exe == echo.
+def _is_marker_echo(e):
+    if e.kind != EXEC or not any(marker in (a or "") for a in e.args):
+        return False
+    return e.comm == "echo" or (e.exe or "").endswith("/echo")
+g = next((e for e in events if _is_marker_echo(e)), None)
+assert g is not None, f"marker echo for {marker!r} not found among the execve events"
 
 full = ProcessTree(events)
 execonly = ProcessTree([e for e in events if e.kind != CLONE])
