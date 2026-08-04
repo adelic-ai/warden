@@ -115,3 +115,20 @@ def test_timeout_message_does_not_claim_the_operation_failed(monkeypatch):
     message = str(caught.value)
     assert "may still have completed" in message
     assert "re-run" in message
+
+
+def test_missing_binary_is_detected_before_the_elevation_prefix():
+    """With `sudo -n incus …` the process that launches is `sudo`, which exists — so a missing
+    `incus` returns sudo's rc=1 'command not found' instead of a FileNotFoundError. The clear
+    install message must survive elevation."""
+    client = RealIncusClient(binary="definitely-not-a-real-binary-xyz")
+    for call in (
+        lambda: client.project_exists("warden"),
+        lambda: client.file_pull("i", "/tmp/x"),
+    ):
+        try:
+            call()
+        except IncusNotFoundError as exc:
+            assert "not found on PATH" in str(exc)
+        else:
+            raise AssertionError("expected IncusNotFoundError")

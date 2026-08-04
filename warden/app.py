@@ -82,6 +82,16 @@ class WardenApp:
 
         if not self.client.network_exists(profiles.BRIDGE_NAME):
             self.client.network_create(profiles.BRIDGE_NAME, profiles.network_config())
+        else:
+            # Converge the subnet, for the same reason the project config is
+            # converged above: a bridge created by an older warden keeps the
+            # address it was created with, and the old default sat inside
+            # CG-NAT — the range Tailscale routes (see profiles.py). Fixing
+            # the constant without this leaves every already-provisioned host
+            # hijacking the tailnet, which is precisely the "looks fixed, is
+            # not" shape. `assert_subnet_sane` runs inside network_config().
+            for key, value in profiles.network_config().items():
+                self.client.network_set(profiles.BRIDGE_NAME, key, value)
 
         self._ensure_egress()
 
@@ -105,7 +115,9 @@ class WardenApp:
         nftables ruleset that nothing loaded, and the proxy was a file
         nobody read. `example.com` and the LAN gateway were both reachable.
         """
-        document = egress.build_acl_document(profiles.BRIDGE_GATEWAY, profiles.PROXY_PORT)
+        document = egress.build_acl_document(
+            profiles.BRIDGE_GATEWAY, profiles.PROXY_PORT, profiles.BRIDGE_SUBNET
+        )
         egress.assert_enforceable(document, profiles.BRIDGE_GATEWAY, profiles.PROXY_PORT)
         if self.client.network_acl_get(egress.ACL_NAME) != document:
             self.client.network_acl_put(egress.ACL_NAME, document)
@@ -208,7 +220,11 @@ class WardenApp:
 
     # -- up -----------------------------------------------------------------
     def up(self, cfg: WardenConfig) -> UpResult:
-        resolve_llm_auth(cfg.llm)  # raises NeedsHumanError if a real run can't proceed
+        # Raises NeedsHumanError if a real run can't proceed. The secret FILE is checked, not just
+        # the environment: `warden up --secret-file …` passed the CLI's pre-check and then failed
+        # here on any host without `GEMINI_API_KEY` also exported, because this call could not see
+        # the flag. See DECISIONS D26.
+        resolve_llm_auth(cfg.llm, secret_file=cfg.secret_file)
 
         self.ensure_substrate(cfg)
 

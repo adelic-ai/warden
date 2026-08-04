@@ -1,0 +1,196 @@
+{
+  "hrTime": [
+    1785632030,
+    400000095
+  ],
+  "hrTimeObserved": [
+    1785632030,
+    400000095
+  ],
+  "resource": {
+    "_rawAttributes": [
+      [
+        "service.name",
+        "gemini-cli"
+      ]
+    ]
+  },
+  "instrumentationScope": {
+    "name": "gemini-cli",
+    "version": "v1"
+  },
+  "attributes": {
+    "session.id": "00000000-0000-4000-8000-000000000001",
+    "event.name": "gemini_cli.config",
+    "model": "SYNTHETIC-MODEL",
+    "approval_mode": "yolo"
+  },
+  "_body": "SYNTHETIC BODY - never read by the adapter"
+}{
+  "hrTime": [
+    1785632031,
+    0
+  ],
+  "hrTimeObserved": [
+    1785632031,
+    0
+  ],
+  "resource": {
+    "_rawAttributes": [
+      [
+        "service.name",
+        "gemini-cli"
+      ]
+    ]
+  },
+  "instrumentationScope": {
+    "name": "gemini-cli",
+    "version": "v1"
+  },
+  "attributes": {
+    "session.id": "00000000-0000-4000-8000-000000000001",
+    "event.name": "gemini_cli.user_prompt",
+    "prompt_length": 641,
+    "prompt_id": "p-1"
+  },
+  "_body": "SYNTHETIC BODY - never read by the adapter"
+}{
+  "hrTime": [
+    1785632038,
+    0
+  ],
+  "hrTimeObserved": [
+    1785632038,
+    0
+  ],
+  "resource": {
+    "_rawAttributes": [
+      [
+        "service.name",
+        "gemini-cli"
+      ]
+    ]
+  },
+  "instrumentationScope": {
+    "name": "gemini-cli",
+    "version": "v1"
+  },
+  "attributes": {
+    "session.id": "00000000-0000-4000-8000-000000000001",
+    "event.name": "gemini_cli.api_response",
+    "model": "SYNTHETIC-MODEL",
+    "input_token_count": 1200,
+    "output_token_count": 240,
+    "status_code": 200,
+    "prompt_id": "p-1"
+  },
+  "_body": "SYNTHETIC BODY - never read by the adapter"
+}{
+  "name": "tool_call",
+  "startTime": [
+    1785632040,
+    0
+  ],
+  "endTime": [
+    1785632040,
+    49999952
+  ],
+  "_spanContext": {
+    "traceId": "00000000000000000000000000000000",
+    "spanId": "0000000000000000"
+  },
+  "instrumentationScope": {
+    "name": "gemini-cli",
+    "version": "v1"
+  },
+  "attributes": {
+    "gen_ai.tool.name": "run_shell_command",
+    "gen_ai.tool.call_id": "call-1"
+  }
+}{
+  "hrTime": [
+    1785632040,
+    49999952
+  ],
+  "hrTimeObserved": [
+    1785632040,
+    49999952
+  ],
+  "resource": {
+    "_rawAttributes": [
+      [
+        "service.name",
+        "gemini-cli"
+      ]
+    ]
+  },
+  "instrumentationScope": {
+    "name": "gemini-cli",
+    "version": "v1"
+  },
+  "attributes": {
+    "session.id": "00000000-0000-4000-8000-000000000001",
+    "event.name": "gemini_cli.tool_call",
+    "function_name": "run_shell_command",
+    "tool_type": "native",
+    "duration_ms": 50.0,
+    "success": true,
+    "decision": "auto_accept",
+    "prompt_id": "p-1"
+  },
+  "_body": "SYNTHETIC BODY - never read by the adapter"
+}{
+  "name": "tool_call",
+  "startTime": [
+    1785632044,
+    0
+  ],
+  "endTime": [
+    1785632044,
+    59999943
+  ],
+  "_spanContext": {
+    "traceId": "00000000000000000000000000000000",
+    "spanId": "0000000000000000"
+  },
+  "instrumentationScope": {
+    "name": "gemini-cli",
+    "version": "v1"
+  },
+  "attributes": {
+    "gen_ai.tool.name": "run_shell_command",
+    "gen_ai.tool.call_id": "call-2"
+  }
+}{
+  "hrTime": [
+    1785632044,
+    59999943
+  ],
+  "hrTimeObserved": [
+    1785632044,
+    59999943
+  ],
+  "resource": {
+    "_rawAttributes": [
+      [
+        "service.name",
+        "gemini-cli"
+      ]
+    ]
+  },
+  "instrumentationScope": {
+    "name": "gemini-cli",
+    "version": "v1"
+  },
+  "attributes": {
+    "session.id": "00000000-0000-4000-8000-000000000001",
+    "event.name": "gemini_cli.tool_call",
+    "function_name": "run_shell_command",
+    "tool_type": "native",
+    "duration_ms": 60.0,
+    "success": true,
+    "decision": "auto_accept",
+    "prompt_id": "p-1"
+  },
+  "_body": "SYNTHETIC BODY - never read by the adapter"
+}

@@ -40,3 +40,32 @@ def test_extra_allow_domains_land_in_both_lists():
 def test_both_flavors_always_snapshot():
     assert resolve(Flavor.MONITORED, "claude").snapshot is True
     assert resolve(Flavor.BUILDER, "claude").snapshot is True
+
+
+# --- the `--audit` toggle (DEMO-SPEC §11.1) ----------------------------------
+# A config toggle, not a third flavor: reconciliation needs both planes, and
+# `builder` — the flavor with a repo and a git history worth reconciling —
+# shipped with only the self-report one.
+
+
+def test_builder_audit_toggle_wires_the_ground_truth_plane():
+    spec = resolve(Flavor.BUILDER, "gemini", audit=True)
+    assert spec.auditd_wired is True
+    # and nothing else moves — this is data, not a new codepath
+    plain = resolve(Flavor.BUILDER, "gemini")
+    assert spec.name == plain.name
+    assert spec.repo_git == plain.repo_git
+    assert spec.permission_mode == plain.permission_mode
+    assert spec.runtime_allowlist == plain.runtime_allowlist
+    assert spec.provisioning_allowlist == plain.provisioning_allowlist
+
+
+def test_builder_audit_defaults_off():
+    assert resolve(Flavor.BUILDER, "claude").auditd_wired is False
+
+
+def test_monitored_is_already_audited_and_the_flag_is_a_no_op():
+    """"Make sure this is audited" is a reasonable thing to say about an
+    instance that already is — not an error."""
+    assert resolve(Flavor.MONITORED, "claude", audit=True).auditd_wired is True
+    assert resolve(Flavor.MONITORED, "claude", audit=False).auditd_wired is True

@@ -21,16 +21,33 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from ipaddress import ip_interface, ip_network
 
 from warden.egress import ACL_NAME as EGRESS_ACL_NAME
 
 IMAGE = "images:debian/12"
 BRIDGE_NAME = "wardenbr0"
-# Pinned, not `auto` — chosen out of the CG-NAT range (RFC 6598), which is
-# unlikely to already be in use on a host's LAN (unlike 10.0.0.0/8 or
-# 192.168.0.0/16, both extremely common LAN choices this must not collide
-# with).
-BRIDGE_SUBNET = "100.89.0.1/24"
+
+# RFC 6598 CG-NAT. This used to look like the *safe* choice — "unlikely to be
+# on a host's LAN, unlike 10.0.0.0/8 or 192.168.0.0/16" — and that reasoning
+# only considered the LAN. It is the range **Tailscale** allocates every node
+# out of, and Tailscale installs a route for the whole /10. A managed bridge
+# with a /24 inside it is more specific, so it wins: every tailnet peer in
+# that /24 becomes unreachable, and if the operator's own path to this host is
+# the tailnet, `warden up` can cut the connection it is being driven over.
+# Measured on the pop-os validation host: `tailscale0` at 100.120.63.5/32 with
+# 100.64.0.0/10 routed, and `wardenbr0` already holding 100.89.0.1/24.
+#
+# Nothing in warden could notice — the bridge came up correctly, the ACL
+# applied, the containers had egress. The damage is entirely off-box.
+CGNAT_RANGE = ip_network("100.64.0.0/10")
+
+# Pinned, not `auto`, and now out of both directions of collision: RFC 1918
+# 172.16/12 is far less common on consumer LANs than 10/8 or 192.168/16, and
+# it is clear of CG-NAT and of Incus's own default `incusbr0` (10.x on this
+# host). `assert_subnet_sane` below is the structural guard that keeps the
+# next person from "improving" this back into a routed overlay's range.
+BRIDGE_SUBNET = "172.29.0.1/24"
 BRIDGE_GATEWAY = BRIDGE_SUBNET.split("/")[0]
 STORAGE_POOL = "wardenpool"
 STORAGE_DRIVER = "btrfs"
@@ -68,7 +85,35 @@ def project_config() -> dict[str, str]:
     }
 
 
+class BridgeSubnetError(RuntimeError):
+    """The bridge subnet would hijack a range something else on this host routes."""
+
+
+def assert_subnet_sane(subnet: str = BRIDGE_SUBNET) -> None:
+    """Refuse a bridge subnet inside CG-NAT (100.64.0.0/10).
+
+    Structural, not advisory: the previous value was chosen *because* CG-NAT
+    looked unused, and the failure it causes is invisible from inside warden
+    (the bridge works perfectly; a routed overlay elsewhere on the host loses
+    the addresses). A comment would not have stopped it — a raise does.
+
+    This is deliberately narrow. It does not try to enumerate every overlay a
+    host might run; it names the one range that is, by convention, always
+    someone else's (Tailscale, and CG-NAT carriers generally).
+    """
+    network = ip_interface(subnet).network
+    if network.subnet_of(CGNAT_RANGE):
+        raise BridgeSubnetError(
+            f"bridge subnet {subnet} is inside CG-NAT {CGNAT_RANGE} — this is the range "
+            "Tailscale (and carrier NAT) allocates from. A more-specific bridge route wins "
+            "over the overlay's /10, so every peer in this /24 becomes unreachable and an "
+            "operator driving warden over the tailnet can lose the host. Pick an RFC 1918 "
+            "subnet outside 100.64.0.0/10."
+        )
+
+
 def network_config(subnet: str = BRIDGE_SUBNET) -> dict[str, str]:
+    assert_subnet_sane(subnet)
     return {
         "ipv4.address": subnet,
         "ipv4.nat": "true",
