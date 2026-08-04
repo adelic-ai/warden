@@ -19,6 +19,24 @@ def test_generate_rule_scopes_by_uid_not_auid():
     assert "-k warden-cap-1" in rule
 
 
+def test_rule_captures_action_and_ancestry_arms():
+    # execve is the action arm (what verdicts reconcile against); clone/fork/
+    # vfork are the ancestry arm — captured so a forked-but-never-execve'd
+    # bridge process doesn't orphan its execve'd subtree (the fork gap).
+    rng = IdRange(1_000_000, 65536)
+    rule = generate_rule(rng, "cap-1")
+    assert "-S execve" in rule
+    for s in ("clone", "fork", "vfork"):
+        assert f"-S {s}" in rule, s
+    # clone3 is deferred: an auditctl that doesn't know the name would reject
+    # the whole fragment and blind execve too. Must not appear until it has
+    # its own failure-tolerant fragment.
+    assert "-S clone3" not in rule
+    # ancestry syscalls ride the SAME uid scope as execve, per arch
+    for arch in ("b64", "b32"):
+        assert f"-F arch={arch} -S execve -S clone -S fork -S vfork" in rule
+
+
 def test_parse_raw_epoch_dialect():
     # unambiguous epoch:serial — the preferred, unambiguous form
     text = (

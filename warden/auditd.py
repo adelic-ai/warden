@@ -90,6 +90,36 @@ def generate_rule(uid_range: "IdRange", instance: str) -> str:
     return "".join(f"-a {' '.join(frag)}\n" for frag in rule_fragments(uid_range, instance))
 
 
+# Syscalls the rule captures, in two deliberately-distinguished roles:
+#
+#   ACTION (semantic) — `execve`. Each execve names the program that ran
+#     (argv). This is what verdicts reconcile against; it is the only arm
+#     that produces "the agent did X".
+#   ANCESTRY (structural) — the process-creation family. These are NOT
+#     actions; they are the EDGES of the process-ancestry graph. We capture
+#     them so a forked-but-never-execve'd bridge process (Gemini's persistent
+#     shell tool is the observed case) still leaves a record, so the ppid
+#     walk from an in-scope execve reaches the runtime pid instead of dying
+#     at an invisible hole. This is the fork-gap fix — see the git-subtree
+#     loss in DEMO-VALIDATION.md (R1) / canon `fidelity_attestation`.
+#
+# Captured broadly (uid-scoped), NOT kernel-side filtered to process-only
+# forks: dropping CLONE_THREAD via `-F a0&0x10000=0` is arch-fragile (clone's
+# flags is a0 on x86 b64/b32, not universally) and — worse — untestable
+# offline, the exact silent-blinding class prove_capture() exists to catch.
+# Thread-clone noise is dropped in the reconciler (userspace, deterministically
+# testable), not here. A leaner kernel-side filter is a possible later
+# optimization, only once proven per-arch with a forking marker.
+ACTION_SYSCALLS = ("execve",)
+# clone/fork/vfork only — all ancient, every x86 auditctl knows the names, so
+# bundling them with execve in one fragment can't be rejected for an unknown
+# token. `clone3` (used by modern node/systemd) is DEFERRED on purpose: an
+# auditctl that doesn't know the name rejects the WHOLE fragment, which would
+# blind execve too. Adding it needs a separately-loaded, failure-tolerant
+# fragment (unknown-name -> missing-telemetry attestation, not a hard error).
+ANCESTRY_SYSCALLS = ("clone", "fork", "vfork")
+
+
 def rule_fragments(uid_range: "IdRange", instance: str) -> list[list[str]]:
     """The same rules as `generate_rule`, as `auditctl` argv fragments.
 
@@ -100,11 +130,22 @@ def rule_fragments(uid_range: "IdRange", instance: str) -> list[list[str]]:
     gemini-capsule build's ground-truth plane. The file in `rules.d` is
     still written, so the rule survives a reboot; only the live load is
     surgical. See DECISIONS.md "D15".
+
+    One fragment per arch captures both the action arm (execve) and the
+    ancestry arm (clone/fork/vfork) as an OR of `-S` syscalls, all under the
+    same uid scope and key. NOTE — this rule change is necessary but not
+    sufficient: the parser (`parse_events`) and reconciler must additionally
+    read `pid`/`ppid` off the SYSCALL records and use the clone edges to
+    bridge the ancestry walk. Capturing clone without consuming its edges
+    changes nothing. And prove_capture() still validates the EXECVE arm only
+    (its marker is an echo/execve); proving the clone arm fires needs a
+    forking marker — a tracked follow-up, not silently assumed.
     """
     key = rule_key(instance)
     lo, hi = uid_range.host_start, uid_range.host_end
+    syscall_flags = [tok for s in ACTION_SYSCALLS + ANCESTRY_SYSCALLS for tok in ("-S", s)]
     return [
-        ["always,exit", "-F", f"arch={arch}", "-S", "execve",
+        ["always,exit", "-F", f"arch={arch}", *syscall_flags,
          "-F", f"uid>={lo}", "-F", f"uid<={hi}", "-k", key]
         for arch in ("b64", "b32")
     ]
