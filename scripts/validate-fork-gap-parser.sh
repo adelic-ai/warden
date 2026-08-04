@@ -39,13 +39,22 @@ sudo auditctl -a always,exit -F "arch=$ARCH_FILTER" -S execve -S clone \
   || fail "auditctl rejected the rule (on aarch64 confirm the kernel knows -S clone)"
 sudo auditctl -l | grep -q "$KEY" || fail "rule not present in auditctl -l after load"
 
-# --- workload: a subshell that NEVER execve's, forking an exec'd marker child -----------------
-# `( /bin/echo M ; : )` - the subshell forks a child to run /bin/echo (an execve), but because the
-# LAST command in the group is the `:` builtin, bash cannot tail-exec-optimize the subshell into a
-# program, so the subshell process itself stays bash and never execve's. That subshell is the
-# never-execve'd bridge; the marker echo must still walk back to bash through a clone edge.
+# --- workload: an explicit double-fork so the middle process NEVER execve's -------------------
+# python(execve) --fork--> BRIDGE(never execs) --fork--> grandchild(execs the marker). Done with
+# os.fork() rather than a bash subshell because bash's subshell/exec optimizations collapse the
+# intermediate (observed on aarch64: the marker attached straight to the calling shell, no hole to
+# bridge). The bridge os.wait()s for the grandchild so it stays alive until after the marker execs
+# - otherwise the grandchild reparents to init and its ppid edge is lost.
 echo "== running workload (marker=$MARKER) =="
-bash -c "( /bin/echo $MARKER ; : )"
+python3 -c '
+import os, sys
+m = sys.argv[1]
+if os.fork() == 0:                 # BRIDGE: forked from python, never execs
+    if os.fork() == 0:             # grandchild: execs the marker
+        os.execvp("/bin/echo", ["/bin/echo", m])
+    os.wait(); os._exit(0)         # bridge waits (stays alive), then exits without ever exec-ing
+os.wait()
+' "$MARKER"
 
 # --- pull the capture ------------------------------------------------------------------------
 sleep 1                                # let auditd flush to /var/log/audit/audit.log
