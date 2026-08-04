@@ -111,13 +111,18 @@ def generate_rule(uid_range: "IdRange", instance: str) -> str:
 # testable), not here. A leaner kernel-side filter is a possible later
 # optimization, only once proven per-arch with a forking marker.
 ACTION_SYSCALLS = ("execve",)
-# clone/fork/vfork only — all ancient, every x86 auditctl knows the names, so
-# bundling them with execve in one fragment can't be rejected for an unknown
-# token. `clone3` (used by modern node/systemd) is DEFERRED on purpose: an
-# auditctl that doesn't know the name rejects the WHOLE fragment, which would
-# blind execve too. Adding it needs a separately-loaded, failure-tolerant
-# fragment (unknown-name -> missing-telemetry attestation, not a hard error).
-ANCESTRY_SYSCALLS = ("clone", "fork", "vfork")
+# `clone` ONLY, and this is arch-PORTABILITY, not caution: aarch64 (the Mac/Lima
+# target) has NO fork/vfork syscall at all — glibc fork()/vfork() route through
+# clone() there — so `-S fork` / `-S vfork` are UNKNOWN tokens that make auditctl
+# reject the whole fragment and blind execve with it (the same failure the clone3
+# deferral avoids). clone exists on every target arch (x86_64/i386/aarch64) and is
+# where glibc fork/vfork and posix_spawn actually land, so it captures the fork-gap
+# case — a shell that fork()s a never-execve'd mediator — on all of them. The only
+# thing not covered is a direct raw fork(2)/vfork(2) syscall (near-nonexistent in
+# the node/bash/git world), and the reconciler's parser still RECOGNISES those if a
+# capture happens to contain them. `clone3` stays deferred for the same
+# unknown-token reason; it needs its own failure-tolerant fragment.
+ANCESTRY_SYSCALLS = ("clone",)
 
 
 def rule_fragments(uid_range: "IdRange", instance: str) -> list[list[str]]:
@@ -132,7 +137,7 @@ def rule_fragments(uid_range: "IdRange", instance: str) -> list[list[str]]:
     surgical. See DECISIONS.md "D15".
 
     One fragment per arch captures both the action arm (execve) and the
-    ancestry arm (clone/fork/vfork) as an OR of `-S` syscalls, all under the
+    ancestry arm (clone) as an OR of `-S` syscalls, all under the
     same uid scope and key. NOTE — this rule change is necessary but not
     sufficient: the parser (`parse_events`) and reconciler must additionally
     read `pid`/`ppid` off the SYSCALL records and use the clone edges to

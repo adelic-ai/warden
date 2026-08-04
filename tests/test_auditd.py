@@ -20,21 +20,22 @@ def test_generate_rule_scopes_by_uid_not_auid():
 
 
 def test_rule_captures_action_and_ancestry_arms():
-    # execve is the action arm (what verdicts reconcile against); clone/fork/
-    # vfork are the ancestry arm — captured so a forked-but-never-execve'd
-    # bridge process doesn't orphan its execve'd subtree (the fork gap).
+    # execve is the action arm (what verdicts reconcile against); clone is the
+    # ancestry arm — captured so a forked-but-never-execve'd bridge process
+    # doesn't orphan its execve'd subtree (the fork gap).
     rng = IdRange(1_000_000, 65536)
     rule = generate_rule(rng, "cap-1")
     assert "-S execve" in rule
-    for s in ("clone", "fork", "vfork"):
-        assert f"-S {s}" in rule, s
-    # clone3 is deferred: an auditctl that doesn't know the name would reject
-    # the whole fragment and blind execve too. Must not appear until it has
-    # its own failure-tolerant fragment.
-    assert "-S clone3" not in rule
-    # ancestry syscalls ride the SAME uid scope as execve, per arch
+    assert "-S clone" in rule
+    # fork/vfork are deliberately NOT in the rule: aarch64 (Mac/Lima) has no such
+    # syscall, so the token would be rejected and blind execve with it. clone is
+    # arch-portable and is where glibc fork/vfork land. clone3 is deferred for the
+    # same unknown-token reason (needs its own failure-tolerant fragment).
+    for absent in ("-S fork", "-S vfork", "-S clone3"):
+        assert absent not in rule, absent
+    # ancestry syscall rides the SAME uid scope as execve, per arch
     for arch in ("b64", "b32"):
-        assert f"-F arch={arch} -S execve -S clone -S fork -S vfork" in rule
+        assert f"-F arch={arch} -S execve -S clone" in rule
 
 
 def test_parse_raw_epoch_dialect():
