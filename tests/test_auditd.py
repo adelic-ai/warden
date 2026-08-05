@@ -19,6 +19,25 @@ def test_generate_rule_scopes_by_uid_not_auid():
     assert "-k warden-cap-1" in rule
 
 
+def test_rule_captures_action_and_ancestry_arms():
+    # execve is the action arm (what verdicts reconcile against); clone is the
+    # ancestry arm — captured so a forked-but-never-execve'd bridge process
+    # doesn't orphan its execve'd subtree (the fork gap).
+    rng = IdRange(1_000_000, 65536)
+    rule = generate_rule(rng, "cap-1")
+    assert "-S execve" in rule
+    assert "-S clone" in rule
+    # fork/vfork are deliberately NOT in the rule: aarch64 (Mac/Lima) has no such
+    # syscall, so the token would be rejected and blind execve with it. clone is
+    # arch-portable and is where glibc fork/vfork land. clone3 is deferred for the
+    # same unknown-token reason (needs its own failure-tolerant fragment).
+    for absent in ("-S fork", "-S vfork", "-S clone3"):
+        assert absent not in rule, absent
+    # ancestry syscall rides the SAME uid scope as execve, per arch
+    for arch in ("b64", "b32"):
+        assert f"-F arch={arch} -S execve -S clone" in rule
+
+
 def test_parse_raw_epoch_dialect():
     # unambiguous epoch:serial — the preferred, unambiguous form
     text = (
