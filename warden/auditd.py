@@ -499,7 +499,16 @@ class RealEventSource:
     reading the raw log file directly if `ausearch` isn't on PATH or the
     caller lacks permission to invoke it. Both paths go through the same
     dialect-tolerant `parse_events`, so this host's ausearch -i/local-time
-    quirks don't need special-casing here."""
+    quirks don't need special-casing here.
+
+    `--input-logs` is load-bearing on a busy host: a co-located audit
+    consumer (e.g. a capsule build under its own key) can push enough
+    volume to ROTATE `/var/log/audit/audit.log`, at which point a plain
+    `ausearch` — which reads only the current log — returns *nothing* for
+    events that rolled into `audit.log.1/.2`, even though capture worked.
+    `--input-logs` reads the whole rotated set. Surfaced by a real Part-B
+    run alongside a capsule (warden events 0 via plain ausearch, 1783 with
+    --input-logs)."""
 
     def __init__(self, instance: str, raw_log_path: str = "/var/log/audit/audit.log"):
         self.key = rule_key(instance)
@@ -508,7 +517,8 @@ class RealEventSource:
     def poll(self) -> list[AuditEvent]:
         try:
             proc = subprocess.run(
-                elevate(["ausearch", "-k", self.key, "--raw"]), capture_output=True, text=True
+                elevate(["ausearch", "-k", self.key, "--raw", "--input-logs"]),
+                capture_output=True, text=True,
             )
             if proc.returncode == 0 and proc.stdout.strip():
                 return parse_events(proc.stdout)

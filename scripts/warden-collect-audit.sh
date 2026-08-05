@@ -46,8 +46,13 @@ tmp="$(mktemp "${out}.XXXXXX")"
 # shellcheck disable=SC2064
 trap "rm -f '$tmp'" EXIT INT TERM
 
+# `--input-logs` reads the ROTATED log set, not just the current audit.log. Load-bearing on a busy
+# host: a co-located capsule build under its own key can push enough volume to rotate
+# /var/log/audit/audit.log, and a plain `ausearch` then returns nothing for events that rolled into
+# audit.log.1/.2 — a silently-empty plane over a capture that actually worked. Surfaced by a real
+# Part-B run (0 records via plain ausearch, 1783 with --input-logs).
 set +e
-ausearch -k "$key" --raw >"$tmp" 2>"${tmp}.err"
+ausearch -k "$key" --raw --input-logs >"$tmp" 2>"${tmp}.err"
 status=$?
 set -e
 
