@@ -1,8 +1,14 @@
 import pytest
 
 from warden.profiles import (
+    BRIDGE_GATEWAY,
+    BRIDGE_SUBNET,
+    CGNAT_RANGE,
+    BridgeSubnetError,
     ProfileValidationError,
+    assert_subnet_sane,
     build_profile,
+    network_config,
     project_config,
     validate_no_host_mounts,
 )
@@ -54,3 +60,36 @@ def test_validate_no_host_mounts_rejects_bind_mount():
 
 def test_validate_no_host_mounts_accepts_pool_backed_root():
     validate_no_host_mounts({"root": {"type": "disk", "pool": "wardenpool", "path": "/"}})
+
+
+def test_bridge_subnet_is_outside_cgnat():
+    """The Tailscale finding. 100.64.0.0/10 is the range Tailscale allocates
+    every node from and routes as a whole; a managed bridge with a /24 inside
+    it is more specific and wins, so the tailnet loses those addresses — and
+    an operator driving warden over the tailnet can lose the host itself."""
+    from ipaddress import ip_interface
+
+    assert not ip_interface(BRIDGE_SUBNET).network.subnet_of(CGNAT_RANGE)
+
+
+def test_bridge_subnet_is_private():
+    from ipaddress import ip_interface
+
+    assert ip_interface(BRIDGE_SUBNET).network.is_private
+
+
+def test_assert_subnet_sane_rejects_a_cgnat_subnet():
+    """The old default, pinned as a rejection so it cannot come back."""
+    with pytest.raises(BridgeSubnetError):
+        assert_subnet_sane("100.89.0.1/24")
+
+
+def test_network_config_refuses_to_build_a_cgnat_bridge():
+    """The guard is on the constructor, not only on the constant — a caller
+    passing an explicit subnet is checked too."""
+    with pytest.raises(BridgeSubnetError):
+        network_config("100.100.5.1/24")
+
+
+def test_gateway_matches_the_subnet():
+    assert BRIDGE_GATEWAY == BRIDGE_SUBNET.split("/")[0]

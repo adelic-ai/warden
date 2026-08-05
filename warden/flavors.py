@@ -51,7 +51,21 @@ class FlavorSpec:
     snapshot: bool = True
 
 
-def resolve(flavor: Flavor, llm: str, extra_allow: Iterable[str] = ()) -> FlavorSpec:
+def resolve(flavor: Flavor, llm: str, extra_allow: Iterable[str] = (), audit: bool = False) -> FlavorSpec:
+    """`audit` (DEMO-SPEC §2/§11.1) turns the ground-truth plane on for a
+    flavor that does not have it by default.
+
+    It is a **config toggle, not new architecture** — deliberately. The whole
+    point of the flavor table being data is that "a builder that is also
+    audited" is one boolean, not a third flavor and not a branch in `app.py`.
+    Reconciliation needs *both* planes, and `builder` (the flavor that has a
+    repo and a git history worth reconciling against) shipped with only the
+    self-report one, so the demo's `report` verb had nothing to check against.
+
+    On `monitored` it is already true and the flag is a no-op rather than an
+    error: "make sure this is audited" is a reasonable thing to say about an
+    instance that already is.
+    """
     if llm not in LLM_ENDPOINTS:
         raise ValueError(f"unknown llm {llm!r}; expected one of {tuple(LLM_ENDPOINTS)}")
     llm_hosts = LLM_ENDPOINTS[llm]
@@ -81,7 +95,7 @@ def resolve(flavor: Flavor, llm: str, extra_allow: Iterable[str] = ()) -> Flavor
             provisioning_allowlist=provisioning,
             runtime_allowlist=runtime,
             repo_git=True,
-            auditd_wired=False,
+            auditd_wired=audit,
             permission_mode="skip-permissions",
         )
 

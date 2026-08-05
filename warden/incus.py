@@ -9,9 +9,12 @@ DECISIONS.md ("Dependency injection over subprocess mocking").
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
+
+from warden.privilege import elevate
 
 # Every `incus` invocation is bounded. The validation run caught the reason:
 # an `incus launch` client sat for 25 minutes while the daemon had in fact
@@ -142,6 +145,7 @@ class IncusClient(Protocol):
     def file_push(
         self, name: str, content: bytes, remote_path: str, project: str = "default"
     ) -> None: ...
+    def file_pull(self, name: str, remote_path: str, project: str = "default") -> bytes: ...
     def snapshot(self, name: str, snapshot: str, project: str = "default") -> None: ...
     def restore(self, name: str, snapshot: str, project: str = "default") -> None: ...
     def delete(self, name: str, project: str = "default") -> None: ...
@@ -161,7 +165,14 @@ class RealIncusClient:
         input_bytes: bytes | None = None,
         timeout: float = QUERY_TIMEOUT,
     ) -> subprocess.CompletedProcess:
-        argv = [self._bin, *args]
+        # Checked before the elevation prefix goes on, not after. With `sudo -n incus …` the
+        # process that actually launches is `sudo`, which exists — so a missing `incus` comes back
+        # as sudo's own rc=1 "command not found" rather than a FileNotFoundError, and the clear
+        # "Incus isn't installed here, see install-incus-nested.sh" message was silently replaced
+        # by an opaque exit code the moment elevation was introduced.
+        if shutil.which(self._bin) is None:
+            raise IncusNotFoundError(self._bin)
+        argv = elevate([self._bin, *args])
         try:
             return subprocess.run(
                 argv, capture_output=True, input=input_bytes,
@@ -186,7 +197,8 @@ class RealIncusClient:
         proc = self._run(args, input_bytes=input_bytes, timeout=timeout)
         if proc.returncode != 0:
             stderr = proc.stderr if isinstance(proc.stderr, str) else proc.stderr.decode(errors="replace")
-            raise IncusCommandError([self._bin, *args], proc.returncode, stderr)
+            # The elevated argv, so the message is the command that actually ran.
+            raise IncusCommandError(elevate([self._bin, *args]), proc.returncode, stderr)
         return proc
 
     # -- existence ------------------------------------------------------
@@ -227,7 +239,11 @@ class RealIncusClient:
         self._run_ok(["project", "unset", name, key])
 
     def network_set(self, name: str, key: str, value: str) -> None:
-        self._run_ok(["network", "set", name, key, value])
+        # `key=value`, not `key value`: Incus 7.x warns the space-separated
+        # form is deprecated, and `ensure_substrate` now calls this on every
+        # `up` to converge the bridge subnet — a call site that has to keep
+        # working. `profile_device_set` already used the supported form.
+        self._run_ok(["network", "set", name, f"{key}={value}"])
 
     def profile_device_set(
         self, profile: str, project: str, device: str, key: str, value: str
@@ -325,6 +341,33 @@ class RealIncusClient:
             input_bytes=content,
             timeout=LIFECYCLE_TIMEOUT,
         )
+
+    def file_pull(self, name: str, remote_path: str, project: str = "default") -> bytes:
+        """Read a file out of the instance, as **bytes**.
+
+        Bytes, not text, because `export` pulls a tar of the built repo through
+        here and a text-mode decode would corrupt it silently — the worst
+        available failure for an artifact whose whole job is to be verbatim.
+
+        `FileNotFoundError` for an absent guest path, so a caller can tell
+        "the agent produced no transcript" from "the pull broke", which are
+        very different things to report.
+        """
+        if shutil.which(self._bin) is None:
+            raise IncusNotFoundError(self._bin)
+        argv = elevate([self._bin, "file", "pull", f"{name}/{remote_path}", "-", "--project", project])
+        try:
+            proc = subprocess.run(argv, capture_output=True, timeout=LIFECYCLE_TIMEOUT)
+        except FileNotFoundError:
+            raise IncusNotFoundError(self._bin) from None
+        except subprocess.TimeoutExpired:
+            raise IncusTimeoutError(argv, LIFECYCLE_TIMEOUT) from None
+        if proc.returncode != 0:
+            stderr = proc.stderr.decode(errors="replace")
+            if "not found" in stderr.lower() or "no such file" in stderr.lower():
+                raise FileNotFoundError(f"{name}:{remote_path}")
+            raise IncusCommandError(argv, proc.returncode, stderr)
+        return proc.stdout
 
     def snapshot(self, name: str, snapshot: str, project: str = "default") -> None:
         self._run_ok(

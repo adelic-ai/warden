@@ -37,3 +37,20 @@ def test_build_config_wires_flavor_spec():
     cfg = build_config(instance="cap-1", flavor="monitored", llm="gemini", project="warden")
     assert cfg.spec.auditd_wired is True
     assert cfg.instance == "cap-1"
+
+
+def test_secret_file_is_carried_on_the_config_not_only_on_the_cli():
+    """`app.up` runs its own `resolve_llm_auth`. Without the path on the config that call could
+    only see the environment, so `warden up --secret-file …` passed the CLI's pre-check and then
+    failed inside `up` on any host that had not also exported GEMINI_API_KEY."""
+    cfg = build_config(
+        instance="i", flavor="builder", llm="gemini", secret_file=Path("/tmp/k")
+    )
+    assert cfg.secret_file == Path("/tmp/k")
+
+
+def test_config_carries_the_path_never_the_material(tmp_path):
+    key = tmp_path / "gemini.key"
+    key.write_text("sk-secret-material")
+    cfg = build_config(instance="i", flavor="builder", llm="gemini", secret_file=key)
+    assert "sk-secret-material" not in repr(cfg)

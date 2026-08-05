@@ -50,7 +50,12 @@ class FakeIncusClient:
         self.network_acls: dict[str, dict] = {}
         self.audit_log: list[AuditEvent] = []
         self.exec_calls: list[tuple[str, list[str]]] = []
+        # substring of the joined argv -> the ExecResult to return. Named `failures` because that
+        # was its only use; `exec_results` is the same mechanism under a name that also covers
+        # "return this stdout", which `export` needs (a `git log` that prints nothing and a
+        # `git log` that fails are different outcomes it has to distinguish).
         self.exec_failures: dict[str, ExecResult] = {}
+        self.exec_results: dict[str, ExecResult] = {}
         self._serial = 0
 
     # -- internal ---------------------------------------------------------
@@ -180,9 +185,10 @@ class FakeIncusClient:
             return ExecResult(1, "", f"{name} is not running")
 
         joined = " ".join(argv)
-        for needle, failure in self.exec_failures.items():
-            if needle in joined:
-                return failure
+        for table in (self.exec_failures, self.exec_results):
+            for needle, canned in table.items():
+                if needle in joined:
+                    return canned
         # `test -d <path>` is the shape warden uses to decide whether the
         # clone landed, so it has to answer honestly.
         if argv[:2] == ["test", "-d"]:
@@ -215,6 +221,14 @@ class FakeIncusClient:
         inst = self._require_instance(name, project)
         inst.config.setdefault("_files", {})  # type: ignore[arg-type]
         inst.config[f"_file:{remote_path}"] = content.decode()
+        inst.paths.add(remote_path)
+
+    def file_pull(self, name: str, remote_path: str, project: str = "default") -> bytes:
+        inst = self._require_instance(name, project)
+        key = f"_file:{remote_path}"
+        if key not in inst.config:
+            raise FileNotFoundError(f"{name}:{remote_path}")
+        return inst.config[key].encode()
 
     def snapshot(self, name: str, snapshot: str, project: str = "default") -> None:
         inst = self._require_instance(name, project)

@@ -53,3 +53,110 @@ committed; `warden up --llm gemini` stops before a real run without one (see
 Per spec, one pass of the §4 acceptance tests against the real pop-os host is a human step
 even once nested-Incus testing works in Lima, since some auditd/kernel specifics may differ.
 Not attempted here — no access to that host from this VM.
+
+---
+
+## 2026-08-03 — The workload demo's one real end-to-end run is pending `~/.warden/gemini.key`
+
+**What:** DEMO-SPEC §8's acceptance is the five-command loop (`up → run → report → export →
+down`) on a real host, in the isolated Incus project `wardendemo`, driven with
+`warden run --example --secret-file ~/.warden/gemini.key`. That file **does not exist** on this
+host, and `GEMINI_API_KEY` is not in the environment.
+
+**Why it needs a human:** a real Gemini API key is exactly the class of secret `resolve_llm_auth`
+refuses to proceed without and that warden must never conjure, guess, or commit. `warden up` and
+`warden run` both stop with `NEEDS-HUMAN:` rather than launching a gemini instance without one —
+that refusal is the designed behaviour, not a blocker to route around, and it was not routed
+around.
+
+**Status, stated exactly:** **logic validated on fixtures; one real run pending the key.**
+
+**What IS validated, and how**
+
+* The whole five-verb loop, against `FakeIncusClient` + checked-in synthetic planes:
+  `tests/test_demo_acceptance.py` walks all seven §8 criteria. 152 tests green.
+* §8.4 for real, not modelled: the `verdicts.jsonl` warden actually writes is validated against
+  canon's own `detection_verdict.schema.json`, each verdict's provenance cid is resolved back to
+  its PROV-O root and SHACL-validated against `well_formed` + the detection shapes, and the
+  tier/calibration gate is asserted over the emitted contracts. canon is not importable under the
+  host's Python 3.10 (it needs ≥3.11); the check ran under a 3.12 venv with the canon workspace
+  installed editable, and skips cleanly where canon is absent.
+* **The privileged half of DESIGN §4's split, on this real host.** `scripts/warden-collect-audit.sh`
+  was exercised via `sudo -n` against a real, by-key auditd rule (`warden-collectorprobe`, scoped
+  to a single uid): the marker exec was captured, the collector wrote a 10,943-byte
+  operator-readable capture in the raw-epoch dialect, and agentwatch's `audit_log.parse_lines`
+  read it with **0 skipped records**. Its refusals were exercised too — a non-`warden-*` key is
+  rejected (rc=3), a no-match key produces an empty capture and rc=0 (an empty plane and an
+  unreadable one must not look alike). The probe rule was removed **by key**; `auditctl -l` shows
+  only the co-located capsule's rule, untouched. `auditctl -D` was never run.
+
+**What is NOT validated, stated plainly**
+
+1. That Gemini CLI, driven `--skip-trust -p "$(cat …)"` hands-off, runs to completion and writes
+   the OTel telemetry file the adapter expects at the configured `outfile`. The adapter was
+   measured against a real capture (agentwatch G6/G23); *warden's own driving of it* has never
+   run.
+2. That a real auditd rule captures that run's execs at the container's derived idmap range, and
+   that `prove_capture` passes against them.
+3. Any number in a report over a real run. The fixture numbers (4 authorized / 1 CONFIRMED /
+   3 NONE) are properties of the fixture, not measurements of Gemini CLI.
+
+**To finish it** (needs the key and ~15 minutes on this host):
+
+```
+printf '%s' "$GEMINI_KEY" > ~/.warden/gemini.key && chmod 600 ~/.warden/gemini.key
+warden up     --flavor builder --llm gemini --audit --project wardendemo \
+              --name wd-demo --secret-file ~/.warden/gemini.key
+warden run    --example --llm gemini --project wardendemo --instance wd-demo \
+              --secret-file ~/.warden/gemini.key
+warden report --llm gemini --project wardendemo --instance wd-demo
+warden export ./out --llm gemini --project wardendemo --instance wd-demo
+warden down   wd-demo --project wardendemo
+```
+
+`report` needs the collector's sudo rule. Nothing above touches the `warden` project or the
+capsule's audit rule.
+
+---
+
+## 2026-08-03 — RESOLVED: the real end-to-end run happened. What it left open is different.
+
+**Supersedes the entry above.** The key was supplied at `~/.warden/gemini.key` and the five-command
+loop ran end to end on pop-os in the isolated `wardendemo` project against Gemini CLI 0.53.1.
+Full write-up: **`DEMO-VALIDATION.md`**. Both things the previous entry listed as unproven are now
+proven on real data: the CLI runs hands-off and writes the telemetry the adapter expects (572
+events, 0 parse skips), and a real auditd rule captured the run at the derived idmap range (1038
+execs, 0 unparsed, marker capture proven).
+
+The key was referenced by path only and never read, printed, logged or committed. Verified after
+the fact: zero occurrences of its contents in the 20.2 MB transcript, the 1.5 MB audit capture, the
+manifest or the report, and `GEMINI_API_KEY` appears in no argv anywhere in the capture.
+
+**What now needs a human — three items, none of them blocking:**
+
+### 1. The fork gap costs the whole work product. That is a design decision, not a patch.
+
+The run's headline is `0 CONFIRMED` — and 15 of 54 work-phase execs were **never evaluated**,
+including every `git` command and the test run, because Gemini CLI's shell tool forks a shell that
+never `execve`s and the ancestry walk terminates there. The report now names them rather than
+reporting a bare count, and the canon fidelity attestation already carries
+`cause.kind=missing-telemetry`. But closing the gap means adding `fork`/`clone` to the audit rule —
+a different observation channel with a much higher event volume, and a real trade someone should
+make deliberately. Not attempted here.
+
+### 2. §8.4 is still fixtures-only, and should not be written up as otherwise.
+
+The run produced zero verdicts (it produced zero CONFIRMED), so "every verdict is schema-valid,
+SHACL `well_formed`, tiers ≤ `well_formed`, calibration absent" is **vacuously** true on real data.
+It is genuinely proven against canon's real API in `tests/test_demo_acceptance.py`, on fixtures. A
+run that actually produces a CONFIRMED — an adversarial or at least a less well-behaved workload —
+is what would close this, and choosing that workload is a judgment call, not a mechanical step.
+
+### 3. Two small pieces of host state a human may want to deal with.
+
+* A root-owned `warden.cli proxy` from an earlier session is still bound to `100.89.0.1:3128`. The
+  address no longer exists on any interface so it cannot receive traffic, but it is a leftover
+  process (started before the D21 subnet fix) and can be reaped.
+* `/etc/audit/rules.d` persistence is skipped under a scoped sudo grant, so a warden audit rule does
+  not survive a reboot. `warden up` says so on stderr. If reboot-survival is wanted, that needs a
+  wider grant or a root-run `up`, and D28 explains why neither was done by default.

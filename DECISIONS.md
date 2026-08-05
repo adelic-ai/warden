@@ -292,3 +292,312 @@ decorative — a bound that a caller can outlive is not a bound.
 creates-or-verifies the pool (btrfs), with a `--pool` flag for operators who want their own.
 Consistent with the bridge: the substrate `up` depends on is either verified or created, not
 assumed.
+
+## D21 — the default bridge subnet was Tailscale-hostile (100.89.0.1/24 → 172.29.0.1/24)
+
+**Finding, reported by the operator before the first `warden up` of the demo build.** The pinned
+bridge subnet `100.89.0.1/24` sits inside `100.64.0.0/10` — RFC 6598 CG-NAT, which is the range
+**Tailscale allocates every node from** and routes as a whole. A managed Incus bridge with a `/24`
+inside it is the more specific route, so it wins: every tailnet peer addressed in `100.89.x`
+becomes unreachable from this host, and an operator driving warden *over* the tailnet can lose the
+connection they are driving it over.
+
+The original reasoning is in the old comment, and it is worth keeping visible because it was
+careful and still wrong: CG-NAT was chosen precisely *because* it is "unlikely to be in use on a
+host's LAN, unlike 10.0.0.0/8 or 192.168.0.0/16". That is true and irrelevant. The check considered
+the physical LAN and not the overlay networks a host also routes — and an overlay is exactly the
+thing that claims a range no LAN uses.
+
+**Nothing in warden could have noticed.** The bridge comes up, the ACL applies, the containers get
+egress, every test passes. The damage is entirely off-box, on a plane warden does not observe.
+Measured on the pop-os validation host at the time of the report: `tailscale0` at `100.120.63.5/32`,
+and `100.89.0.0/24 dev wardenbr0 ... linkdown` already installed in the main routing table — latent
+only because no instance had carrier yet.
+
+Three parts to the fix, because the first alone would have been decorative:
+
+1. **The constant** is now `172.29.0.1/24` — RFC 1918, clear of CG-NAT and of Incus's own
+   `incusbr0` (10.234.56.0/24 on this host).
+2. **`profiles.assert_subnet_sane`** raises on any bridge subnet inside `100.64.0.0/10`. A comment
+   would not have prevented this; the previous value was chosen *by* reasoning about ranges. It is
+   deliberately narrow — it names the one range that is by convention always someone else's, and
+   does not attempt to enumerate every overlay a host might run.
+3. **`ensure_substrate` converges the bridge**, the same way it already converges project config. A
+   bridge created by an older warden keeps the address it was created with, so changing the
+   constant would have left every already-provisioned host — including this one — still hijacking
+   the tailnet while the code claimed to be fixed.
+
+### The carve-out this forced, and the guard that caught it
+
+Moving out of CG-NAT put the bridge *inside* `172.16.0.0/12`, which is one of the LAN drops. On
+this Incus, specific drops outrank broad allows (capsule T8), so the drop would have shadowed the
+`/32` allows for the proxy and resolver and left the container with **no egress at all**.
+`egress.assert_enforceable` refused the document immediately — the guard written for a footgun this
+build had already hit caught a *different* instance of it, introduced by an unrelated change. That
+is the argument for structural guards over comments, made without anyone having to make it.
+
+`egress.lan_drops` now subtracts the bridge network from whichever private range contains it, via
+exact `address_exclude` rather than dropping the containing `/12` wholesale — dropping RFC 1918 is
+the point of the rule, and discarding ~1M addresses to make one `/24` reachable would trade a
+broken container for a quiet hole. Output is sorted so the ACL document is byte-stable and
+`ensure_substrate` does not rewrite it on every run.
+
+Note the prior comment "the bridge's own subnet is deliberately absent [from LAN_DROPS]" was true
+*by accident*: CG-NAT is not an RFC 1918 range, so nothing had to enforce it. It is enforced now.
+
+Also fixed in passing: `RealIncusClient.network_set` used the space-separated `<key> <value>` form,
+which Incus 7.x deprecates with a warning. Harmless until now; `ensure_substrate` calls it on every
+`up` as of this change, so it was made the supported `<key>=<value>` form.
+
+## D22 — `--audit` on `builder` is a flavor-table boolean, not a third flavor
+
+DEMO-SPEC §11.1. Reconciliation needs both planes; `builder` — the flavor that has a repo and a git
+history worth reconciling against — shipped `auditd_wired=False`, so `warden report` would have had
+a self-report plane and nothing to check it against.
+
+Kept as one boolean on the existing table rather than a `builder-audited` flavor or a branch in
+`app.py`, because that is what the data-driven flavor model is *for*: `app.py` already reads
+`cfg.spec.auditd_wired` and does the right thing. The test asserts the negative too — every other
+field of the spec is unchanged by the toggle — so this stays a config change rather than quietly
+becoming a second codepath.
+
+`restore` takes the flag as well. A restore reallocates the idmap, and an audited builder restored
+without it would skip the re-derive-and-re-prove and leave the ground-truth plane filtering a dead
+range while `auditctl -l` still looked correct — §1's I6-breaks-I5 gotcha, which is the whole reason
+`restore` is a warden verb instead of an `incus` invocation.
+
+On `monitored` the flag is a no-op rather than an error: asking for audit on something already
+audited is a reasonable thing to say.
+
+## D23 — `warden run`: the phase boundary is drawn before the work window, not inside it
+
+DEMO-SPEC §3/§11.2. Three judgment calls, all of which would have been invisible if made the other
+way.
+
+**Installing the agent CLI is provisioning, so it happens before `started_at`.** §1 splits `run`
+into provisioning (clone, install, env prep — actions that often have no authorizing tool call and
+are *expected*) and work (the accountable phase). The agent CLI is not installed by `up` at all:
+`_provision` installs git and ca-certificates and nothing else, and `deb.nodesource.com` sits in
+the builder's *provisioning* allowlist and deliberately not in its runtime one. So `run` installs
+it, widening to the provisioning allowlist and narrowing back **before** the agent runs — the same
+D13 discipline `up` follows, and the narrow-back is in a `finally` so a failed install cannot leave
+the wide list active. Had installation landed inside the work window, several hundred `npm`/`dpkg`
+execs that no tool call authorizes would flood the accountable phase, and the demo would be
+presenting reconciliation noise as reconciliation.
+
+**The secret never enters an argv, on either side.** `incus exec --env K=V` puts the value in the
+*host's* `incus` argv (visible to `ps`); building `sh -c "K=$KEY …"` on the host puts it in the
+guest's. So the key is pushed into the instance as bytes — read, never decoded, never formatted
+into a message — and dereferenced *inside* the guest by a `$(cat …)` that is literal text in every
+argv that exists. auditd captures syscall arguments and not environments, so the key is absent from
+the ground-truth plane **by construction rather than by redaction**. `resolve_llm_auth` returns a
+description of where the secret came from, and the description is what the manifest records. The
+test asserts the material appears in no argv and in no manifest.
+
+Same reasoning applies to the **prompt**, for a different failure: it is pushed as a file and read
+with `"$(cat …)"` rather than interpolated, so a prompt containing a quote cannot rewrite the shell
+command. That is a bug class warden should not have.
+
+**The manifest records the derived idmap; it is not a source for it.** The range is derived at run
+time so the record of the run is complete, and `report` derives it *again* rather than reading it
+back. §1's never-freeze-the-idmap rule has already been violated three times by exactly this shape
+— a plausible-looking cache — and a manifest is the most plausible one yet.
+
+Smaller calls: a non-zero *agent* exit is recorded, not raised — an agent that failed at its task
+still produced a transcript and a trace, and that run is still reportable. A wall-clock cap is
+recorded as `timed_out` rather than swallowed, because a capped run's trace is truncated and a
+reader has to know that before drawing conclusions from what is missing. `WORKDIR` is `/root/work`,
+not `up --repo`'s `/root/repo`, so a run with no `--repo` still has a git history to export and a
+run with one keeps the two separate.
+
+`RUN_MANIFEST_SCHEMA_VERSION` is checked on load and refuses a version it does not speak, per
+§10's "keep the outputs schema-stable and versioned — they are the eventual input to the cohort and
+calibration layers".
+
+## D24 — `warden report`: what warden contributes, and the three places it refuses
+
+DEMO-SPEC §4/§11.3. This is glue, and keeping it glue is a decision: every reconciliation call is
+agentwatch's (`run_once`, the reconcilers, `canon_emit`), every custody call is canon's. warden
+contributes only the four things agentwatch cannot know — which uid to scope to, proof the plane is
+live, where the phase boundary is, and the privilege split.
+
+### It refuses rather than reporting something plausible, in three places
+
+**No ground-truth plane** — an instance created without `--audit` has a self-report plane and
+nothing to check it against. Reporting over that would be "trusting the thing you're supposed to be
+watching", which is DESIGN §0's opening line as a failure mode.
+
+**Capture not proven** — a marker exec must be captured under *this instance's own key* before the
+plane is trusted at all. `auditctl -l` proves a rule is loaded text, not that it matches; D14 had a
+deleted instance's rule with an overlapping uid range tagging a live instance's execs under the
+dead key, and uid-only matching called that a pass.
+
+**Idmap reallocated between `run` and `report`** — a restore moves the range. The run's records
+carry the OLD host uids and the live rule watches the new ones, so *neither* value reconciles that
+run: the new range matches none of the run's records and reads as a beautifully clean run, and the
+old range is the frozen value §1 exists about. There is no third option that is honest, so it
+stops. §8.7's "re-derived, not frozen" is satisfied by deriving here and comparing, not by picking.
+
+### The phase split has three windows, not two
+
+§1 asks for provisioning vs. work. There is a third, and leaving it out would have quietly
+inflated the accountable one: `after_run` holds warden's **own** capture-proof marker exec, which
+`report` runs at report time. The observer's footprint must not be counted inside the window it is
+observing.
+
+Related, and initially wrong in the design: provisioning noise does not stay out of the work phase
+because of the phase split. It stays out because `RuntimeScope` excludes anything outside the
+agent's session subtree — `apt-get`/`npm` are not descendants of the agent runtime, so they are
+never evaluated. The phase split's real job is to make that *visible*: `not_evaluated` is reported
+**per phase**, because "47 unevaluated execs, all in the provisioning window" and "47 unevaluated
+execs in the work window" mean opposite things, and one number cannot distinguish them.
+
+### The one duplication is a cross-check
+
+`run_once` must own `findings.jsonl`/`verdicts.jsonl` or their schema drifts from agentwatch's
+(§10). But it returns only *newly written* findings, and the summary needs the whole candidate
+population including the ones that were correctly silent. So the candidate pass runs here too, over
+the same two files. Rather than accept that as duplication, `Summary.consistent` asserts the two
+agree and the CLI exits non-zero if they do not — a disagreement means one pass is wrong, and the
+report says so instead of printing a confident number.
+
+### `findings.jsonl` is touched; `verdicts.jsonl` is not
+
+A clean run writes no findings, and `FindingsStore` only creates the file on append — so a
+genuinely clean reconciliation and a report that never ran are byte-identical on disk (both: no
+file). An empty file says "I looked and found nothing". `verdicts.jsonl` is deliberately *not*
+touched when canon is unavailable, because an empty verdicts file would imply the canon projection
+ran and produced none — a different claim from "canon was not importable here", which is what
+`verdicts_unavailable_reason` says instead.
+
+### The honesty bar is data in the artifact, not prose in a README
+
+`report.json` carries `calibrated: false`, `analysis_engine: false`,
+`recall_validated_for: "shell-out only"`, `guarantee_tier_max: "well_formed"` and
+`calibration_field: "absent"` as fields. A README nobody exports is not a caveat; a field in the
+file that travels with the data is. The verdict kinds are separate fields with no total that fuses
+them, and the test asserts the *keys* — no `deviation`, `risk_score`, `severity_total` anywhere.
+
+### The collector refuses a non-`warden-*` key
+
+It runs as root via a sudo rule, so a caller that could choose an arbitrary key could read any
+audit stream on the host — a wider grant than the privilege split intends. It only ever reads, and
+never `auditctl -D`: a co-located capsule build has its own rule here.
+
+## D25 — `warden export`: the archive says what it is missing, and labels the git history a claim
+
+DEMO-SPEC §5/§11.4. `export` is deliberately dumb — it collects and never summarises, because §7's
+"no analysis engine" means the consumer analyses. Two things it does that a plain `tar` would not:
+
+**`CONTENTS.json` lists every artifact §5 asks for, present or not, with a reason.** An archive
+silently lacking `verdicts.jsonl` is indistinguishable from one where the reconciliation found
+nothing to verdict, and those are opposite claims. Same for the built repo: "the agent never
+created one" is a fact *about the run*, so it is recorded rather than raised — a traceback there
+would also have cost the reader the audit capture and the findings, which are the parts that
+matter most.
+
+**`README.txt` labels the git history as claimed, not verified.** §5 says it outright: git history
+is agent-controlled — the agent picks what to `git add` and what the message says — so it is the
+*claimed* work product, reconcilable against FILE_WRITE ground truth (a v2 axis, §10) and not
+trustworthy alone. That sentence ships inside the archive, along with which plane is forgeable and
+which is not, and the three limits from §7. A caveat that lives in a README on the producer's
+machine is not a caveat; one that travels with the data is.
+
+The archive name is derived from the run's own clock, so two exports of one run produce one path
+rather than a pile of near-identical tarballs. Members are rooted in a single directory — an
+archive that explodes into the reader's cwd is a hostile artifact.
+
+## D26 — `warden up --secret-file` passed its own pre-check and then failed inside `up`
+
+Found by writing the §8 acceptance loop, which is the first thing to drive `up` and `run` in
+sequence with a secret file and no `GEMINI_API_KEY` in the environment.
+
+`cli._up` called `resolve_llm_auth(llm, secret_file=args.secret_file)` as a fail-fast pre-check —
+correctly — and then `app.up(cfg)` called `resolve_llm_auth(cfg.llm)` again with **no secret_file**,
+because the flag lived only on the argparse namespace. On any host that had not also exported
+`GEMINI_API_KEY`, that second call raised `NeedsHumanError` *after* the pre-check had passed. The
+flag was, in practice, only useful to people who did not need it.
+
+Two things made this survive review. The pre-check reads like the check, so the second call looks
+redundant rather than differently-parameterised. And every existing test that exercises `up` with
+gemini either sets the environment variable or uses claude (whose `resolve_llm_auth` takes neither
+path). Nothing was wrong with the second call existing — `app.up` should not trust its caller to
+have validated — it was wrong that it could not see what the caller had validated *with*.
+
+Fixed by carrying `secret_file` on `WardenConfig`: the path, never the material, and `repr` of a
+config is safe to log. Both calls now check the same thing.
+
+## D27 — §8 acceptance, and exactly which half is modelled
+
+`tests/test_demo_acceptance.py` walks DEMO-SPEC §8's seven criteria against `FakeIncusClient` plus
+the checked-in synthetic planes — the same arrangement `test_acceptance.py` uses for the wizard's
+§4, for the same reason (no real host in the loop here).
+
+The file says in its docstring which half is not proven, and the loop marks the substitution
+inline rather than letting the fake quietly manufacture it:
+
+  * that Gemini CLI driven with `--skip-trust -p` runs hands-off to completion and writes the
+    telemetry file the adapter expects — **unproven**, needs a real host and a key;
+  * that a real auditd rule captures that run's execs at the derived range — **unproven**, same.
+
+Everything else is proven here, and one thing is proven *for real* rather than modelled: §8.4. The
+verdicts warden actually writes are validated against canon's own
+`detection_verdict.schema.json`, their provenance cids are resolved back to PROV-O roots and
+SHACL-validated against `well_formed` + the detection shapes, and the tiers/calibration gate is
+asserted over the emitted contracts. That check runs against the real canon API or it skips; it is
+never simulated.
+
+The example prompt gets an assertion of its own (§6/§7): the shipped text must contain a real build
+(`git init`, `unittest`, `commit`) and must NOT contain the words that would indicate a staged
+gotcha (`&`, `nohup`, `background`, `curl`, `wget`, `fork`). A later "improvement" that plants a
+fork gap so the demo can catch it now fails a test, which is the only durable way to hold §7's line
+on a file that looks harmless to edit.
+
+The loop runs in project `wardendemo`, never `warden`, and asserts the `warden` project stays
+empty — a demo must not share a project with a co-located capsule build.
+
+## D28 — per-invocation `sudo -n`, not `sudo warden`
+
+Driving the real end-to-end run surfaced that the real adapters shell out to `incus` and
+`auditctl` unelevated. On the validation host the operator is in `sudo` but not in `incus`, so
+`incus` cannot reach the daemon socket and `auditctl` refuses outright. DEMO-SPEC §9 already asked
+for "scoped sudo if run hands-off (incus/auditctl/ausearch/nft)"; this is that.
+
+**Per-invocation, not per-process.** `sudo warden up` would have been one line, and it is the wrong
+shape: running the whole wizard as root moves `Path.home()` to `/root`, so the allowlist file, the
+run directory and every exported artifact silently relocate — and the *monitor*, which holds
+prompt-bearing data and is most of the code, ends up with exactly the privilege DESIGN §4's split
+exists to keep it away from. So the process stays unprivileged and only the individual
+root-requiring invocations are elevated (`warden/privilege.py`). `sudo -n` never prompts: a
+hands-off run that blocks on a password is a hang with no output, which reads like a broken plane.
+
+### Two things this broke, both caught
+
+**The missing-binary message.** With `sudo -n incus …` the process that launches is `sudo`, which
+exists — so a missing `incus` came back as sudo's own rc=1 "command not found" instead of a
+`FileNotFoundError`, and the clear "Incus isn't installed here, see install-incus-nested.sh"
+message was silently replaced by an opaque exit code. `shutil.which` is now checked *before* the
+prefix goes on. A pre-existing test caught this; it is the kind of regression that would otherwise
+only surface on someone else's fresh box.
+
+**The rules.d write.** `/etc/audit/rules.d` is root-owned and writing it is *not* in a scoped
+`incus/auditctl/ausearch/nft` grant. Widening the grant (a `tee`/`rm` rule, or a second privileged
+script that writes arbitrary paths) buys only reboot-persistence, at the cost of a much broader
+privilege than the read-only collector. So persistence is **best-effort and reported**:
+`persistence_installed` records whether the file was written, `warden up` says so on stderr when it
+was not, and the live `auditctl` rule — the half that actually captures — is unaffected. Failing a
+working ground-truth plane over a property the demo does not use would be the wrong trade; claiming
+it silently would be worse.
+
+### `prune` now reads the loaded rules, and that is a fix, not a workaround
+
+It scanned `rules.d` for stale instances. Where persistence is skipped there are no files, so it
+would have found nothing — but the *loaded* rules are still there, and a dead instance's loaded
+rule with an overlapping uid range is precisely the D14 shadowing hazard (the kernel's exit filter
+stops at the first match, tagging a live instance's execs under the dead key). It now derives stale
+instances from `auditctl -l` and adds the directory scan when readable. That is strictly better
+than the file-only version on *any* host: a rule loaded with no file — after a crash, on any
+machine — was previously invisible to it.
+
+The key-prefix filter is unchanged and tested: `prune` only ever considers `warden-*` keys, so a
+co-located capsule's rule is never a candidate.
