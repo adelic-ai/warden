@@ -146,3 +146,50 @@ def diagnose_and_recover(
     client: IncusClient, *, instance: Optional[str] = None, project: str = "default"
 ) -> RecoveryResult:
     return recover(client, diagnose(client, instance=instance, project=project), project=project)
+
+
+class SubstrateUnrecovered(RuntimeError):
+    """A warden operation timed out and auto-recovery could not make it succeed — an L3 daemon wedge
+    warden can't fix, or a hang that persisted after an L1/L2 heal. Carries the human-facing hint so
+    the CLI can surface it and exit NEEDS-HUMAN, never a false success."""
+
+    def __init__(self, message: str, result: Optional[RecoveryResult] = None):
+        self.result = result
+        super().__init__(message)
+
+
+def _noop(_msg: str) -> None:
+    pass
+
+
+def run_with_recovery(
+    client: IncusClient,
+    operation,
+    *,
+    instance: Optional[str] = None,
+    project: str = "default",
+    log=_noop,
+):
+    """Run `operation()`; on an `IncusTimeoutError`, diagnose + recover the substrate and retry it
+    ONCE. Recovery is logged (never silent). Only retries when recovery actually healed (L1/L2) — an
+    L3 daemon wedge (or a hang that survives one heal) raises `SubstrateUnrecovered` instead of
+    retrying, because retrying against a wedged daemon would just hang again.
+
+    `operation` MUST be idempotent — warden's up/run/restore are (re-run converges), which is what
+    makes the single retry safe."""
+    try:
+        return operation()
+    except IncusTimeoutError as first:
+        log("warden: operation timed out — diagnosing the substrate before assuming failure...")
+        result = diagnose_and_recover(client, instance=instance, project=project)
+        log(f"warden: {result.diagnosis.tier} — {result.diagnosis.detail}")
+        if not result.recovered:
+            raise SubstrateUnrecovered(result.needs_human or result.diagnosis.detail, result) from first
+        log(f"warden: recovered ({result.action}); retrying the operation once...")
+        try:
+            return operation()
+        except IncusTimeoutError as second:
+            # Healed once but it still timed out — do NOT loop. Surface with the action we took.
+            raise SubstrateUnrecovered(
+                f"operation still timed out after recovery ({result.action})", result
+            ) from second

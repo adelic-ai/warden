@@ -19,7 +19,7 @@ from warden.config import NeedsHumanError, build_config, resolve_llm_auth
 from warden.example_prompt import EXAMPLE_PROMPT
 from warden.incus import IncusCommandError, IncusNotFoundError, RealIncusClient
 from warden.proxy import RealProxyAllowlistController, run_forever
-from warden.recover import diagnose_and_recover
+from warden.recover import SubstrateUnrecovered, diagnose_and_recover, run_with_recovery
 from warden.export import Exporter
 from warden.report import REPORT_NAME, ReportError, Reporter, render
 from warden.workload import MANIFEST_NAME, RunManifest, WorkloadError, WorkloadRunner, run_dir_for
@@ -187,8 +187,18 @@ def _up(args: argparse.Namespace) -> int:
         pool=args.pool,
     )
     try:
-        result = app.up(cfg)
+        # up() is idempotent, so on a mid-operation Incus timeout warden auto-diagnoses the
+        # substrate, self-heals a stuck-op/hung-instance (L1/L2), and retries once; an L3 daemon
+        # wedge it can't fix is surfaced (SubstrateUnrecovered), never retried into a hang.
+        result = run_with_recovery(
+            app.client, lambda: app.up(cfg),
+            instance=cfg.instance, project=cfg.project,
+            log=lambda m: print(m, file=sys.stderr),
+        )
     except IncusNotFoundError as exc:
+        print(f"NEEDS-HUMAN: {exc}", file=sys.stderr)
+        return 2
+    except SubstrateUnrecovered as exc:
         print(f"NEEDS-HUMAN: {exc}", file=sys.stderr)
         return 2
     except (IncusCommandError, ProvisioningError) as exc:

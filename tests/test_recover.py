@@ -2,14 +2,19 @@
 one tier warden is not privileged for."""
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
+from warden.incus import IncusTimeoutError
 from warden.recover import (
     TIER_DAEMON_WEDGED,
     TIER_HEALTHY,
     TIER_HUNG_INSTANCE,
     TIER_STUCK_OPERATION,
+    SubstrateUnrecovered,
     diagnose,
     diagnose_and_recover,
     recover,
+    run_with_recovery,
 )
 from tests.fakes import FakeIncusClient
 
@@ -107,3 +112,55 @@ def test_recover_healthy_is_a_noop():
     result = recover(client, diagnose(client, now=NOW))
     assert result.recovered
     assert result.action == "nothing to recover"
+
+
+# ---- auto-recover wrapper (run_with_recovery) ----
+def test_auto_recover_passes_a_success_straight_through():
+    client = FakeIncusClient()
+    assert run_with_recovery(client, lambda: "done") == "done"
+
+
+def test_auto_recover_heals_a_hung_instance_then_retries_and_succeeds():
+    client = FakeIncusClient()
+    name = _running_instance(client)
+    client._hung.add(name)  # the operation's first attempt will time out; diagnosis sees the hang
+    calls = []
+
+    def op():
+        calls.append(1)
+        if len(calls) == 1:
+            raise IncusTimeoutError(["up"], 60.0)   # first attempt hangs
+        return "up-ok"                               # retry (post force-restart) succeeds
+
+    result = run_with_recovery(client, op, instance=name, project="warden")
+    assert result == "up-ok"
+    assert len(calls) == 2                       # retried exactly once
+    assert (name, True) in client.restarts       # L2 recovery actually happened
+
+
+def test_auto_recover_surfaces_a_daemon_wedge_without_retrying():
+    client = FakeIncusClient()
+    client._responsive = False
+    calls = []
+
+    def op():
+        calls.append(1)
+        raise IncusTimeoutError(["up"], 60.0)
+
+    with pytest.raises(SubstrateUnrecovered) as caught:
+        run_with_recovery(client, op)
+    assert "systemctl restart incus" in str(caught.value)
+    assert len(calls) == 1                        # did NOT retry into a wedged daemon
+
+
+def test_auto_recover_gives_up_after_a_second_timeout_never_loops():
+    client = FakeIncusClient()
+    name = _running_instance(client)
+    client._hung.add(name)
+
+    def op():  # always times out, even after the heal
+        raise IncusTimeoutError(["up"], 60.0)
+
+    with pytest.raises(SubstrateUnrecovered) as caught:
+        run_with_recovery(client, op, instance=name, project="warden")
+    assert "still timed out after recovery" in str(caught.value)
