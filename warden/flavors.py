@@ -26,7 +26,10 @@ LLM_ENDPOINTS: dict[str, tuple[str, ...]] = {
 # One-time setup domains — needed to install the LLM CLI and its
 # dependencies, not needed once the instance is actually running.
 DEBIAN_SETUP: tuple[str, ...] = ("deb.debian.org", "security.debian.org")
-NODE_SETUP: tuple[str, ...] = ("deb.nodesource.com",)
+# The node-CLI install path needs BOTH the NodeSource apt repo (node itself) and the npm registry
+# the CLI package is pulled from (`npm install -g @google/gemini-cli` / `@anthropic-ai/claude-code`).
+# Both are one-time provisioning domains, removed from the runtime allowlist afterwards.
+NODE_SETUP: tuple[str, ...] = ("deb.nodesource.com", "registry.npmjs.org")
 
 # A builder keeps these at runtime too (it's *building*, on an ongoing
 # basis, not just once at provisioning) — this is the "+GitHub/npm/
@@ -72,7 +75,11 @@ def resolve(flavor: Flavor, llm: str, extra_allow: Iterable[str] = (), audit: bo
     extra = tuple(extra_allow)
 
     if flavor is Flavor.MONITORED:
-        provisioning = tuple(sorted(set(DEBIAN_SETUP) | set(llm_hosts) | set(extra)))
+        # NODE_SETUP so the node-based LLM CLI can actually be installed at provisioning. monitored
+        # is the audited flavor `report` reconciles against, so it MUST be able to stand its agent
+        # up — the old set omitted the node/npm sources and 403'd the install. Narrowed away at
+        # runtime (below): node/npm are provisioning-only, the agent only reaches the LLM endpoint.
+        provisioning = tuple(sorted(set(DEBIAN_SETUP) | set(NODE_SETUP) | set(llm_hosts) | set(extra)))
         runtime = tuple(sorted(set(llm_hosts) | set(extra)))
         return FlavorSpec(
             name="monitored",
