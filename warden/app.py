@@ -47,6 +47,78 @@ class UpResult:
     capture_proof: Optional[AuditEvent]
 
 
+@dataclass
+class RingResult:
+    ring: str
+    status: str  # "pass" | "fail" | "skip"
+    detail: str
+
+
+@dataclass
+class VerifyResult:
+    """The output of `verify` — a per-ring runtime measurement, not a set-and-assume.
+
+    `ok` is False if ANY ring failed. A `skip` (e.g. auditd not wired for this flavor) is not a
+    failure, but it is also never counted as a pass — the whole point of `verify` is that a green
+    is measured, so an unmeasured ring is reported as skipped, out loud, never folded into ok."""
+
+    instance: str
+    rings: list[RingResult]
+
+    @property
+    def ok(self) -> bool:
+        return all(r.status != "fail" for r in self.rings)
+
+
+def _http_code(result: ExecResult) -> str:
+    """The 3-digit code `curl -w '%{http_code}'` printed, or '' if the probe produced none.
+
+    An empty/garbage code must NEVER read as a pass: it means the probe did not run (curl missing,
+    exec error), i.e. we did not measure. `interpret_egress` treats '' as a failure for exactly the
+    reasons this whole sweep exists (D17/D18: the check's own mechanism must not fabricate a verdict)."""
+    code = (result.stdout or "").strip()
+    return code if len(code) == 3 and code.isdigit() else ""
+
+
+def interpret_egress(
+    allow_code: str,
+    deny_proxy_code: str,
+    deny_direct_code: str,
+    lan_direct_code: Optional[str] = None,
+) -> RingResult:
+    """Turn the probe codes into an egress verdict. 000 = connection blocked, 2xx/3xx/4xx = the
+    origin was reached, 403 (via proxy) = the allowlist refused. A MISSING code is always a failure
+    — verify measures deny, it never assumes it.
+
+    - allowlisted host, via proxy: must REACH the origin -> code present and not in {000, 403}.
+    - non-allowlisted host, via proxy: must be REFUSED  -> code in {403, 000}.
+    - non-allowlisted host, DIRECT (proxy bypassed): must be BLOCKED by network default-drop -> 000.
+    - LAN gateway, direct (optional): must be BLOCKED -> 000.
+    """
+    problems: list[str] = []
+    if allow_code in ("", "000", "403"):
+        problems.append(f"allowlisted host not reachable through the proxy (code={allow_code or 'none'})")
+    if deny_proxy_code not in ("403", "000"):
+        problems.append(
+            f"non-allowlisted host was NOT refused by the proxy (code={deny_proxy_code or 'none'}) "
+            "— allowlist not enforced"
+        )
+    if deny_direct_code != "000":
+        problems.append(
+            f"non-allowlisted host reachable DIRECT (code={deny_direct_code or 'none'}) "
+            "— network default-drop not enforced"
+        )
+    if lan_direct_code is not None and lan_direct_code != "000":
+        problems.append(f"LAN gateway reachable direct (code={lan_direct_code or 'none'})")
+
+    if problems:
+        return RingResult("egress", "fail", "; ".join(problems))
+    detail = f"allow={allow_code} deny-proxy={deny_proxy_code} deny-direct={deny_direct_code}"
+    if lan_direct_code is not None:
+        detail += f" lan-direct={lan_direct_code}"
+    return RingResult("egress", "pass", detail)
+
+
 class WardenApp:
     def __init__(
         self,
@@ -322,3 +394,85 @@ class WardenApp:
             return False
         self.client.delete(instance, project=project)
         return True
+
+    # -- verify -------------------------------------------------------------
+    def verify(
+        self,
+        cfg: WardenConfig,
+        *,
+        probe_host: str = "example.com",
+        lan_gateway: Optional[str] = None,
+    ) -> VerifyResult:
+        """Runtime-PROVE every ring on a running instance — the measured counterpart to `up`, which
+        *sets* enforcement and (for egress) only statically asserts the ACL document. `up` reports
+        the cage is up; `verify` reports what is actually true right now: unprivileged idmap, egress
+        deny (a non-allowlisted host blocked at both the network and the proxy while the allowlisted
+        host is reachable), and a FRESH audit-capture proof. Never assumes; a probe that can't run
+        is a failure, not a silent pass."""
+        rings: list[RingResult] = []
+
+        if not self.client.instance_exists(cfg.instance, cfg.project):
+            return VerifyResult(cfg.instance, [
+                RingResult("instance", "fail", f"{cfg.instance} not found in project {cfg.project}")
+            ])
+        if not self.client.exec(cfg.instance, ["/bin/true"], project=cfg.project).ok:
+            return VerifyResult(cfg.instance, [
+                RingResult("instance", "fail", "instance is not responding to exec")
+            ])
+        rings.append(RingResult("instance", "pass", "up, responds to exec"))
+
+        # unprivileged — container-root must map to a high host uid, not host-root
+        try:
+            idmap = derive_idmap(self.client, cfg.instance, project=cfg.project)
+            assert_unprivileged(idmap)
+            rings.append(RingResult(
+                "unprivileged", "pass",
+                f"container-root -> host uid {idmap.uid.host_start} (> 0)",
+            ))
+        except Exception as exc:  # AssertionError from assert_unprivileged, or a derive failure
+            rings.append(RingResult("unprivileged", "fail", str(exc)))
+
+        # egress — the ring `up` never runtime-checks
+        rings.append(self._verify_egress(cfg, probe_host, lan_gateway))
+
+        # audit capture — re-prove with a FRESH marker; do not trust up's earlier proof
+        if not cfg.spec.auditd_wired:
+            rings.append(RingResult("audit-capture", "skip", "auditd not wired for this flavor"))
+        elif self.audit_installer is None or self.event_source_factory is None:
+            rings.append(RingResult(
+                "audit-capture", "fail",
+                "flavor wires auditd but this app has no audit_installer/event_source_factory",
+            ))
+        else:
+            try:
+                idmap = derive_idmap(self.client, cfg.instance, project=cfg.project)
+                source = self.event_source_factory(cfg.instance)
+                proof = prove_capture(self.client, source, cfg.instance, idmap.uid, project=cfg.project)
+                rings.append(RingResult(
+                    "audit-capture", "pass", f"fresh marker captured at uid {proof.uid}"
+                ))
+            except Exception as exc:
+                rings.append(RingResult("audit-capture", "fail", str(exc)))
+
+        return VerifyResult(cfg.instance, rings)
+
+    def _egress_probe(self, cfg: WardenConfig, url: str, *, direct: bool) -> str:
+        """curl the url from inside the container, return the http_code ('' if it produced none).
+        `direct=True` bypasses the container's proxy env (`--noproxy '*'`) to test the network layer;
+        `direct=False` goes through the proxy allowlist."""
+        argv = ["curl", "-sS", "-o", "/dev/null", "-w", "%{http_code}"]
+        argv += ["--noproxy", "*", "-m", "6"] if direct else ["-m", "20"]
+        argv.append(url)
+        return _http_code(self.client.exec(cfg.instance, argv, project=cfg.project))
+
+    def _verify_egress(
+        self, cfg: WardenConfig, probe_host: str, lan_gateway: Optional[str]
+    ) -> RingResult:
+        allow = cfg.spec.runtime_allowlist[0] if cfg.spec.runtime_allowlist else None
+        if not allow:
+            return RingResult("egress", "skip", "flavor has no runtime allowlist to probe against")
+        allow_code = self._egress_probe(cfg, f"https://{allow}/", direct=False)
+        deny_proxy = self._egress_probe(cfg, f"https://{probe_host}/", direct=False)
+        deny_direct = self._egress_probe(cfg, f"https://{probe_host}/", direct=True)
+        lan_code = self._egress_probe(cfg, f"http://{lan_gateway}/", direct=True) if lan_gateway else None
+        return interpret_egress(allow_code, deny_proxy, deny_direct, lan_code)

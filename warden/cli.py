@@ -124,6 +124,21 @@ def build_parser() -> argparse.ArgumentParser:
     # range — the exact I6-breaks-I5 failure `restore` exists to prevent.
     restore.add_argument("--audit", action="store_true")
 
+    verify = sub.add_parser(
+        "verify",
+        help="runtime-PROVE every ring on a running instance (measures deny; does not assume)",
+    )
+    verify.add_argument("instance")
+    verify.add_argument("--flavor", choices=["monitored", "builder"], required=True)
+    verify.add_argument("--llm", choices=["claude", "gemini"], required=True)
+    verify.add_argument("--project", default="warden")
+    verify.add_argument("--audit", action="store_true",
+                        help="must match the up that created it — verify re-proves audit capture when set")
+    verify.add_argument("--probe-host", default="example.com",
+                        help="a NON-allowlisted host that must be blocked (default: example.com)")
+    verify.add_argument("--lan-gateway", default=None,
+                        help="optional LAN gateway IP that must be unreachable (e.g. from `ip route`)")
+
     return parser
 
 
@@ -371,6 +386,30 @@ def _restore(args: argparse.Namespace) -> int:
     return 0
 
 
+def _verify(args: argparse.Namespace) -> int:
+    cfg = build_config(
+        instance=args.instance, flavor=args.flavor, llm=args.llm,
+        project=args.project, audit=args.audit,
+    )
+    app = WardenApp(
+        RealIncusClient(),
+        audit_installer=RealAuditRuleInstaller(),
+        event_source_factory=lambda inst: RealEventSource(inst),
+        # verify only reads/probes; no allowlist file is written, so no proxy controller is needed.
+    )
+    try:
+        result = app.verify(cfg, probe_host=args.probe_host, lan_gateway=args.lan_gateway)
+    except IncusNotFoundError as exc:
+        print(f"NEEDS-HUMAN: {exc}", file=sys.stderr)
+        return 2
+
+    symbol = {"pass": "PASS", "fail": "FAIL", "skip": "skip"}
+    for r in result.rings:
+        print(f"  [{symbol.get(r.status, r.status):4}] {r.ring}: {r.detail}")
+    print(f"verify: {result.instance} — {'ALL RINGS PROVEN' if result.ok else 'FAILED (see above)'}")
+    return 0 if result.ok else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -386,6 +425,8 @@ def main(argv: list[str] | None = None) -> int:
         return _down(args)
     if args.command == "restore":
         return _restore(args)
+    if args.command == "verify":
+        return _verify(args)
     if args.command == "proxy":
         return _proxy(args)
     parser.error("unknown command")
