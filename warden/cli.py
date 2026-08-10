@@ -402,6 +402,11 @@ def _verify(args: argparse.Namespace) -> int:
     except IncusNotFoundError as exc:
         print(f"NEEDS-HUMAN: {exc}", file=sys.stderr)
         return 2
+    except IncusCommandError as exc:
+        # e.g. the readiness check times out on a wedged daemon — a clean error + exit 1, the same
+        # shape every other handler uses, never a raw traceback.
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
 
     symbol = {"pass": "PASS", "fail": "FAIL", "skip": "skip"}
     for r in result.rings:

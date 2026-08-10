@@ -459,11 +459,19 @@ class WardenApp:
     def _egress_probe(self, cfg: WardenConfig, url: str, *, direct: bool) -> str:
         """curl the url from inside the container, return the http_code ('' if it produced none).
         `direct=True` bypasses the container's proxy env (`--noproxy '*'`) to test the network layer;
-        `direct=False` goes through the proxy allowlist."""
+        `direct=False` goes through the proxy allowlist.
+
+        A probe that ERRORS (the exec times out / the daemon is wedged) returns '' — the same as a
+        probe that produced no code — so `interpret_egress` reads it as a FAIL, not an escaped
+        traceback. A verify must never crash on a slow probe, and it must never call a probe it
+        could not run a pass."""
         argv = ["curl", "-sS", "-o", "/dev/null", "-w", "%{http_code}"]
         argv += ["--noproxy", "*", "-m", "6"] if direct else ["-m", "20"]
         argv.append(url)
-        return _http_code(self.client.exec(cfg.instance, argv, project=cfg.project))
+        try:
+            return _http_code(self.client.exec(cfg.instance, argv, project=cfg.project))
+        except IncusCommandError:
+            return ""
 
     def _verify_egress(
         self, cfg: WardenConfig, probe_host: str, lan_gateway: Optional[str]

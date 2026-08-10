@@ -8,7 +8,7 @@ from warden.app import (
     interpret_egress,
 )
 from warden.config import build_config
-from warden.incus import ExecResult
+from warden.incus import ExecResult, IncusTimeoutError
 from tests.fakes import (
     FakeAuditRuleInstaller,
     FakeEventSource,
@@ -111,3 +111,19 @@ def test_verify_skips_audit_capture_for_a_flavor_without_auditd():
     by = {r.ring: r.status for r in result.rings}
     assert by["audit-capture"] == "skip"   # builder flavor: auditd not wired
     assert result.ok                       # skip is not a fail
+
+
+class _ExecAlwaysTimesOut:
+    """A client whose every exec raises — stands in for a wedged daemon / a hung probe."""
+
+    def exec(self, name, argv, project="default", **kwargs):
+        raise IncusTimeoutError(argv, 6.0)
+
+
+def test_egress_probe_survives_an_exec_timeout_as_empty_not_a_crash():
+    # A slow/hung probe must fail the ring (empty code -> interpret_egress fails), never escape as
+    # a raw traceback. This is the error-handling gap the verify feature would otherwise introduce.
+    app = WardenApp(_ExecAlwaysTimesOut())
+    cfg = build_config(instance="cap-1", flavor="monitored", llm="claude", project="warden")
+    assert app._egress_probe(cfg, "https://anything/", direct=False) == ""
+    assert app._egress_probe(cfg, "https://anything/", direct=True) == ""
