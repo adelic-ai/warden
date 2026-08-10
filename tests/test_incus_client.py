@@ -13,6 +13,19 @@ from warden.incus import (
 )
 
 
+@pytest.fixture
+def incus_on_path(monkeypatch):
+    """Make the `incus` binary resolvable without a real install.
+
+    These tests assert behaviour *given the binary is present* (per-operation timeouts, hang
+    handling). `_run` does an intentional pre-flight `shutil.which` check before the elevation
+    prefix (see incus.py and test_missing_binary_is_detected_before_the_elevation_prefix), so on a
+    machine with no `incus` on PATH that check fires first and the mocked `subprocess.run` is never
+    reached. Stubbing `which` here keeps these tests hermetic — green on any dev machine, not just a
+    provisioned Incus host. The missing-binary tests deliberately do NOT use this fixture."""
+    monkeypatch.setattr("warden.incus.shutil.which", lambda _bin: "/usr/bin/incus")
+
+
 def test_missing_binary_raises_clean_error_not_raw_traceback():
     client = RealIncusClient(binary="definitely-not-a-real-binary-xyz")
     try:
@@ -42,7 +55,7 @@ class _Recorder:
         return subprocess.CompletedProcess(argv, 0, "", "")
 
 
-def test_every_invocation_is_bounded(monkeypatch):
+def test_every_invocation_is_bounded(monkeypatch, incus_on_path):
     """No `incus` call may be unbounded — an unbounded subprocess has no
     failure mode, only an absence of progress."""
     rec = _Recorder()
@@ -60,7 +73,7 @@ def test_every_invocation_is_bounded(monkeypatch):
     assert all(t is not None and t > 0 for t in rec.timeouts), rec.timeouts
 
 
-def test_timeouts_are_sized_per_operation(monkeypatch):
+def test_timeouts_are_sized_per_operation(monkeypatch, incus_on_path):
     """A metadata read that takes a minute is broken; `apt-get install`
     through the proxy legitimately takes several. One global bound would have
     to be the larger, which would leave metadata hangs effectively unbounded."""
@@ -79,14 +92,14 @@ def test_timeouts_are_sized_per_operation(monkeypatch):
     assert query_t < launch_t <= exec_t
 
 
-def test_exec_timeout_is_overridable_for_probes(monkeypatch):
+def test_exec_timeout_is_overridable_for_probes(monkeypatch, incus_on_path):
     rec = _Recorder()
     monkeypatch.setattr(subprocess, "run", rec)
     RealIncusClient().exec("cap-mon", ["/bin/true"], project="warden", timeout=5.0)
     assert rec.timeouts == [5.0]
 
 
-def test_a_hang_raises_rather_than_reading_as_absent(monkeypatch):
+def test_a_hang_raises_rather_than_reading_as_absent(monkeypatch, incus_on_path):
     """The load-bearing half. Existence checks read `.returncode`, so a
     timeout that *returned* would silently become "doesn't exist" and send
     warden off to recreate something that already exists."""
@@ -103,7 +116,7 @@ def test_a_hang_raises_rather_than_reading_as_absent(monkeypatch):
     assert caught.value.timeout == QUERY_TIMEOUT
 
 
-def test_timeout_message_does_not_claim_the_operation_failed(monkeypatch):
+def test_timeout_message_does_not_claim_the_operation_failed(monkeypatch, incus_on_path):
     """Killing the client does not cancel the operation on the daemon: the run
     that motivated this bound had the instance created, started and running
     while its client hung. The error must not assert otherwise."""
