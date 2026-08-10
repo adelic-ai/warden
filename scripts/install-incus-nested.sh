@@ -45,7 +45,12 @@ else
   echo "== incus already installed, skipping package step =="
 fi
 
-if incus storage list --format csv 2>/dev/null | cut -d, -f1 | grep -qx "${STORAGE_POOL}"; then
+# Producer fully into a var, then grep a here-string — never `producer | grep -q` under
+# `set -o pipefail`: grep -q exits at the first match and SIGPIPEs the producer, which pipefail
+# then reports as 141, a false negative *caused by the match* (see DECISIONS D18). Harmless here
+# only because the pool list is tiny; written safely so a larger producer can't reintroduce it.
+existing_pools="$(incus storage list --format csv 2>/dev/null | cut -d, -f1)"
+if grep -qx "${STORAGE_POOL}" <<<"${existing_pools}"; then
   echo "== storage pool ${STORAGE_POOL} already exists, skipping admin init =="
 else
   echo "== incus admin init: throwaway btrfs pool + pinned bridge =="

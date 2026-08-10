@@ -37,7 +37,11 @@ echo "== loading rule: -S execve -S clone, uid=$U =="
 sudo auditctl -a always,exit -F "arch=$ARCH_FILTER" -S execve -S clone \
   -F "uid>=$U" -F "uid<=$U" -k "$KEY" \
   || fail "auditctl rejected the rule (on aarch64 confirm the kernel knows -S clone)"
-sudo auditctl -l | grep -q "$KEY" || fail "rule not present in auditctl -l after load"
+# Capture then grep a here-string, not `auditctl -l | grep -q` under pipefail: grep -q's early
+# exit SIGPIPEs auditctl -> 141 -> a false "rule not present" *when the rule IS there* (DECISIONS
+# D18). Tiny output makes it latent, not absent.
+loaded_rules="$(sudo auditctl -l)"
+grep -q -- "$KEY" <<<"$loaded_rules" || fail "rule not present in auditctl -l after load"
 
 # --- workload: an explicit double-fork so the middle process NEVER execve's -------------------
 # python(execve) --fork--> BRIDGE(never execs) --fork--> grandchild(execs the marker). Done with
