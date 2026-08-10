@@ -1,14 +1,15 @@
 """Locate the agentwatch checkout for the integration tests.
 
-`warden report` is the agentwatch↔wizard integration (DEMO-SPEC §4); the two live in separate
-repos on separate lines (§9: "agentwatch pieces land on its `build` (v2) line"), so there is no
-package dependency to resolve — the operator puts it on PYTHONPATH.
+`warden report` is the agentwatch↔wizard integration (DEMO-SPEC §4); the two live in separate repos,
+so there is no package dependency to resolve — the operator puts agentwatch on PYTHONPATH. Since the
+2026-08 consolidation there is ONE agentwatch (the merged standalone: `~/dev/agentwatch`, published to
+`github.com/adelic-ai/agentwatch`); the old `agentwatch-v2` line was retired and deleted.
 
 Resolution order, most explicit first:
 
   1. ``WARDEN_AGENTWATCH_PATH``
-  2. a sibling ``agentwatch-v2`` checkout next to this repo
-  3. already importable
+  2. already importable (e.g. pip-installed)
+  3. a sibling ``agentwatch`` checkout next to this repo (``~/dev/agentwatch``)
 
 If none apply, the integration tests **skip with a reason** rather than fail. warden's own logic is
 fully covered without them; what would be lost is the cross-repo wiring, and a red suite on a
@@ -30,7 +31,7 @@ def _agentwatch_root() -> Path | None:
     explicit = os.environ.get("WARDEN_AGENTWATCH_PATH")
     if explicit:
         return Path(explicit).expanduser()
-    sibling = _REPO.parent / "agentwatch-v2"
+    sibling = _REPO.parent / "agentwatch"
     if (sibling / "agentwatch" / "run.py").exists():
         return sibling
     return None
@@ -61,7 +62,7 @@ requires_agentwatch = pytest.mark.skipif(
     not AGENTWATCH_AVAILABLE,
     reason=(
         "agentwatch is not importable — set WARDEN_AGENTWATCH_PATH or check it out beside this "
-        "repo as ./agentwatch-v2 (its `build` line). See DEMO-SPEC §9."
+        "repo as ./agentwatch (the merged standalone; github.com/adelic-ai/agentwatch)."
     ),
 )
 

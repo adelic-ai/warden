@@ -153,8 +153,9 @@ python3 -m pytest tests/ -v
 ```
 
 `warden report` is the agentwatch integration, so its tests need agentwatch on `PYTHONPATH`
-(`WARDEN_AGENTWATCH_PATH=…`, or check it out beside this repo as `./agentwatch-v2`); they skip with
-a reason rather than fail if it is absent. The canon assertions (`verdicts.jsonl` schema-valid,
+(`WARDEN_AGENTWATCH_PATH=…`, or check it out beside this repo as `./agentwatch` — the merged
+standalone, `github.com/adelic-ai/agentwatch`); they skip with a reason rather than fail if it is
+absent. The canon assertions (`verdicts.jsonl` schema-valid,
 SHACL `well_formed`, tiers not inflated) additionally need canon importable, which needs Python
 ≥3.11 — they skip cleanly where it is not, and where canon is absent `verdicts.jsonl` is simply not
 written rather than faked.

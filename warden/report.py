@@ -107,7 +107,8 @@ def _import_agentwatch():
         raise AgentwatchUnavailable(
             f"agentwatch is not importable ({exc}). `warden report` is the agentwatch integration; "
             "it has no local reimplementation of the reconciler and will not invent one. Put the "
-            "agentwatch checkout on PYTHONPATH (its `build` line — see DEMO-SPEC §9)."
+            "agentwatch checkout on PYTHONPATH (the merged standalone at ~/dev/agentwatch / "
+            "github.com/adelic-ai/agentwatch), or set WARDEN_AGENTWATCH_PATH."
         ) from exc
 
 
@@ -478,7 +479,13 @@ class Reporter:
             phases[phase_of(candidate.event.ts)].add(
                 candidate.verdict.value if candidate.verdict else None,
                 candidate.reason,
-                matched=not candidate.is_orphan,
+                # `matched` = an authorizing tool_use was actually found — NOT merely "not an orphan".
+                # The consolidated agentwatch emits UNEVALUABLE candidates (is_orphan=False AND
+                # matched_pid=None: it could not look, so it neither matched nor orphaned — e.g.
+                # warden's own after-run capture marker, which its clone-capture fix now bridges into
+                # scope). `not is_orphan` counted those as authorized and inflated the accountable
+                # window; keying off matched_pid leaves an UNEVALUABLE exec correctly un-evaluated.
+                matched=candidate.matched_pid is not None,
             )
         # Name the unevaluated remainder. `(ts, pid)` rather than pid alone: a pid can execve more
         # than once (a PATH search records the failed attempt and then the successful one), and
