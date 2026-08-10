@@ -42,7 +42,25 @@ assembles them — the [design doc](DESIGN.md) and the [3-view site](web/) tell 
 
 Provision a plain Linux VM with **full root and a normal kernel** (Linode / Hetzner / DO / Vultr /
 EC2 all work; 2–4 vCPU, 4–8 GB). Incus unprivileged containers + auditd all need that, which rules
-out Codespaces and most PaaS. Then `scripts/install-incus-nested.sh`, and:
+out Codespaces and most PaaS. Then run `scripts/install-incus-nested.sh`.
+
+**`warden report` reconciles via [agentwatch](https://github.com/adelic-ai/agentwatch) — a separate
+repo by design (no package dependency), and *not on PyPI*.** `up`/`run`/`down` do not need it; only
+`report` does. The zero-setup path is to check agentwatch out **beside** your warden clone — `report`
+discovers a sibling `./agentwatch` automatically:
+
+```
+# put the two repos side by side, e.g. ~/dev/warden and ~/dev/agentwatch
+git clone https://github.com/adelic-ai/agentwatch.git
+```
+
+Equivalently: `pip install -e /path/to/agentwatch` (a local editable install — no PyPI needed;
+agentwatch has zero third-party deps), `export WARDEN_AGENTWATCH_PATH=/path/to/agentwatch`, or put it
+on `PYTHONPATH`. If it is missing, `report` stops with an actionable message — never a silent or
+invented result. (`verdicts.jsonl` *additionally* needs canon importable — see the canon note; without
+canon you still get `findings.jsonl` and the full reconciliation summary.)
+
+Then:
 
 ```
 warden up     --flavor builder --llm gemini --audit --project wardendemo --name wd-demo \
