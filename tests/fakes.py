@@ -19,7 +19,7 @@ import re
 from dataclasses import dataclass, field
 
 from warden.auditd import AuditEvent, extract_marker
-from warden.incus import ExecResult, IncusCommandError
+from warden.incus import ExecResult, IncusCommandError, IncusTimeoutError
 
 _REPO_PATH = "/root/repo"
 
@@ -57,6 +57,11 @@ class FakeIncusClient:
         self.exec_failures: dict[str, ExecResult] = {}
         self.exec_results: dict[str, ExecResult] = {}
         self._serial = 0
+        # -- recovery simulation knobs (see warden/recover.py) --
+        self._responsive = True            # tests set False to simulate a wedged daemon (L3)
+        self._operations: list[dict] = []  # tests populate to simulate stuck operations (L1)
+        self._hung: set[str] = set()       # instance names whose exec hangs (L2)
+        self.restarts: list[tuple[str, bool]] = []  # (name, force) recorded by restart()
 
     # -- internal ---------------------------------------------------------
     def _alloc_range(self) -> int:
@@ -181,6 +186,9 @@ class FakeIncusClient:
     ) -> ExecResult:
         inst = self._require_instance(name, project)
         self.exec_calls.append((name, list(argv)))
+        if name in self._hung:
+            # a hung agent: the bounded exec times out rather than returning (the L2 signal)
+            raise IncusTimeoutError(list(argv), timeout or 0.0)
         if not inst.running:
             return ExecResult(1, "", f"{name} is not running")
 
@@ -250,6 +258,22 @@ class FakeIncusClient:
 
     def list_instances(self, project: str) -> list[str]:
         return [n for (p, n) in self.instances if p == project]
+
+    # -- operational recovery (simulatable via the knobs in __init__) --------
+    def responsive(self, timeout: float = 60.0) -> bool:
+        return self._responsive
+
+    def operations(self) -> list[dict]:
+        return list(self._operations)
+
+    def operation_delete(self, op_id: str) -> None:
+        self._operations = [o for o in self._operations if o.get("id") != op_id]
+
+    def restart(self, name: str, project: str = "default", force: bool = False) -> None:
+        inst = self._require_instance(name, project)
+        inst.running = True
+        self._hung.discard(name)  # a force-restart clears the hang
+        self.restarts.append((name, force))
 
 
 class FakeEventSource:

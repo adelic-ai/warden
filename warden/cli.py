@@ -19,6 +19,7 @@ from warden.config import NeedsHumanError, build_config, resolve_llm_auth
 from warden.example_prompt import EXAMPLE_PROMPT
 from warden.incus import IncusCommandError, IncusNotFoundError, RealIncusClient
 from warden.proxy import RealProxyAllowlistController, run_forever
+from warden.recover import diagnose_and_recover
 from warden.export import Exporter
 from warden.report import REPORT_NAME, ReportError, Reporter, render
 from warden.workload import MANIFEST_NAME, RunManifest, WorkloadError, WorkloadRunner, run_dir_for
@@ -138,6 +139,15 @@ def build_parser() -> argparse.ArgumentParser:
                         help="a NON-allowlisted host that must be blocked (default: example.com)")
     verify.add_argument("--lan-gateway", default=None,
                         help="optional LAN gateway IP that must be unreachable (e.g. from `ip route`)")
+
+    recover = sub.add_parser(
+        "recover",
+        help="diagnose a wedged Incus substrate and self-heal what warden is privileged for "
+             "(stuck operation / hung instance); a daemon-level wedge is surfaced, never faked",
+    )
+    recover.add_argument("--instance", default=None,
+                         help="also probe this instance for a hung agent (the L2 check)")
+    recover.add_argument("--project", default="warden")
 
     return parser
 
@@ -415,6 +425,26 @@ def _verify(args: argparse.Namespace) -> int:
     return 0 if result.ok else 1
 
 
+def _recover(args: argparse.Namespace) -> int:
+    client = RealIncusClient()
+    try:
+        result = diagnose_and_recover(client, instance=args.instance, project=args.project)
+    except IncusNotFoundError as exc:
+        print(f"NEEDS-HUMAN: {exc}", file=sys.stderr)
+        return 2
+    except IncusCommandError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"diagnosis: {result.diagnosis.tier} — {result.diagnosis.detail}")
+    if result.needs_human is not None:
+        # a daemon-level wedge warden cannot fix — surfaced, exit 2 (NEEDS-HUMAN), never a false green
+        print(f"NEEDS-HUMAN: {result.needs_human}", file=sys.stderr)
+        return 2
+    print(f"recover: {result.action}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -432,6 +462,8 @@ def main(argv: list[str] | None = None) -> int:
         return _restore(args)
     if args.command == "verify":
         return _verify(args)
+    if args.command == "recover":
+        return _recover(args)
     if args.command == "proxy":
         return _proxy(args)
     parser.error("unknown command")

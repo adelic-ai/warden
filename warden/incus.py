@@ -150,6 +150,11 @@ class IncusClient(Protocol):
     def restore(self, name: str, snapshot: str, project: str = "default") -> None: ...
     def delete(self, name: str, project: str = "default") -> None: ...
     def list_instances(self, project: str) -> list[str]: ...
+    # -- operational recovery (warden/recover.py) --
+    def responsive(self, timeout: float = QUERY_TIMEOUT) -> bool: ...
+    def operations(self) -> list[dict]: ...
+    def operation_delete(self, op_id: str) -> None: ...
+    def restart(self, name: str, project: str = "default", force: bool = False) -> None: ...
 
 
 class RealIncusClient:
@@ -390,3 +395,28 @@ class RealIncusClient:
     def list_instances(self, project: str) -> list[str]:
         proc = self._run_ok(["list", "--project", project, "--format", "json"])
         return [item["name"] for item in json.loads(proc.stdout)]
+
+    # -- operational recovery (see warden/recover.py) ------------------------
+    def responsive(self, timeout: float = QUERY_TIMEOUT) -> bool:
+        """Did the daemon answer a cheap bounded query? A timeout here is the L3 signal — the daemon
+        itself is wedged, not one instance — so this returns False rather than raising, letting the
+        recovery path branch on it. Every other failure still raises (a wedged daemon is not the
+        same as a broken one, and only the timeout means 'unresponsive')."""
+        try:
+            self._run(["project", "list", "--format", "csv"], timeout=timeout)
+            return True
+        except IncusTimeoutError:
+            return False
+
+    def operations(self) -> list[dict]:
+        proc = self._run_ok(["operation", "list", "--format", "json"])
+        return json.loads(proc.stdout or "[]")
+
+    def operation_delete(self, op_id: str) -> None:
+        self._run_ok(["operation", "delete", op_id])
+
+    def restart(self, name: str, project: str = "default", force: bool = False) -> None:
+        argv = ["restart", name, "--project", project]
+        if force:
+            argv.append("--force")
+        self._run_ok(argv, timeout=LIFECYCLE_TIMEOUT)
