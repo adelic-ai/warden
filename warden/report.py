@@ -49,6 +49,7 @@ import json
 import os
 import socket
 import subprocess
+import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -94,22 +95,50 @@ class AgentwatchUnavailable(ReportError):
     there is no warden-local reimplementation of the reconciler, and there must not be."""
 
 
+def _try_import_agentwatch() -> None:
+    from agentwatch import canon_emit, runtimes  # noqa: F401
+    from agentwatch.events import EXEC  # noqa: F401
+    from agentwatch.groundtruth import audit_log  # noqa: F401
+    from agentwatch.reconciler.orphan import reconcile_orphans_scoped  # noqa: F401
+    from agentwatch.reconciler.parse_health import assess_parse_health  # noqa: F401
+    from agentwatch.reconciler.verdict import Verdict  # noqa: F401
+    from agentwatch.run import Config, run_once  # noqa: F401
+
+
 def _import_agentwatch():
-    try:
-        from agentwatch import canon_emit, runtimes  # noqa: F401
-        from agentwatch.events import EXEC  # noqa: F401
-        from agentwatch.groundtruth import audit_log  # noqa: F401
-        from agentwatch.reconciler.orphan import reconcile_orphans_scoped  # noqa: F401
-        from agentwatch.reconciler.parse_health import assess_parse_health  # noqa: F401
-        from agentwatch.reconciler.verdict import Verdict  # noqa: F401
-        from agentwatch.run import Config, run_once  # noqa: F401
-    except ImportError as exc:
-        raise AgentwatchUnavailable(
-            f"agentwatch is not importable ({exc}). `warden report` is the agentwatch integration; "
-            "it has no local reimplementation of the reconciler and will not invent one. Put the "
-            "agentwatch checkout on PYTHONPATH (the merged standalone at ~/dev/agentwatch / "
-            "github.com/adelic-ai/agentwatch), or set WARDEN_AGENTWATCH_PATH."
-        ) from exc
+    """Make agentwatch importable, then import the names `report` uses.
+
+    agentwatch is NOT on PyPI — it is found on the import path, not installed from an index. Try it
+    already-on-path first (a `pip install -e` or a set PYTHONPATH), then discover it the same way the
+    test conftest does so a plain sibling checkout works with no setup: WARDEN_AGENTWATCH_PATH, then
+    an `agentwatch` checkout beside this repo (`~/dev/agentwatch` next to `~/dev/warden`)."""
+    repo_root = Path(__file__).resolve().parent.parent
+    roots: list[Optional[Path]] = [None]  # None = "already on sys.path"
+    env = os.environ.get("WARDEN_AGENTWATCH_PATH")
+    if env:
+        roots.append(Path(env).expanduser())
+    roots.append(repo_root.parent / "agentwatch")
+
+    last_exc: Optional[ImportError] = None
+    for root in roots:
+        if root is not None:
+            if not (root / "agentwatch" / "run.py").exists():
+                continue
+            if str(root) not in sys.path:
+                sys.path.insert(0, str(root))
+        try:
+            _try_import_agentwatch()
+            return
+        except ImportError as exc:
+            last_exc = exc
+
+    raise AgentwatchUnavailable(
+        f"agentwatch is not importable ({last_exc}). `warden report` is the agentwatch integration; "
+        "it has no local reimplementation of the reconciler and will not invent one. agentwatch is "
+        "not on PyPI — put the merged standalone (~/dev/agentwatch / github.com/adelic-ai/agentwatch) "
+        "on PYTHONPATH, `pip install -e` it, set WARDEN_AGENTWATCH_PATH, or check it out beside this "
+        "repo as ./agentwatch."
+    ) from last_exc
 
 
 # --- the privileged collector (DESIGN §4) ---------------------------------------------------
