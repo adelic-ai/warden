@@ -24,6 +24,22 @@ LLM_ENDPOINTS: dict[str, tuple[str, ...]] = {
     "gemini": ("generativelanguage.googleapis.com",),
 }
 
+# Interactive-login endpoints for the `dev` flavor. The operator authenticates their OWN account
+# (`gemini` "Login with Google" / `claude` subscription login) — warden injects no key — so egress
+# must reach the OAuth login + token hosts and the account-tier API the CLI talks to under that auth.
+# These are runtime hosts (login happens when the operator runs the agent), unlike DEBIAN/NODE_SETUP.
+# Determined empirically against the CLI login flow: deny-by-default egress surfaces any missing host.
+LLM_AUTH_ENDPOINTS: dict[str, tuple[str, ...]] = {
+    # gemini free-tier OAuth talks to Code Assist (cloudcode-pa), not the API-key endpoint.
+    "gemini": (
+        "accounts.google.com",
+        "oauth2.googleapis.com",
+        "www.googleapis.com",
+        "cloudcode-pa.googleapis.com",
+    ),
+    "claude": ("claude.ai", "console.anthropic.com"),
+}
+
 # One-time setup domains — needed to install the LLM CLI and its
 # dependencies, not needed once the instance is actually running.
 DEBIAN_SETUP: tuple[str, ...] = ("deb.debian.org", "security.debian.org")
@@ -59,6 +75,10 @@ class FlavorSpec:
     # True for `dev`: the persistent daily home. Marked on the instance so a stray `warden down`
     # refuses to delete it without --force (Fork P). Workload/monitored instances stay throwaway.
     persistent: bool = False
+    # True for `dev`: install the agent CLI (node + gemini/claude) at provisioning. Workload/monitored
+    # install it at *run* time; `dev` has no run step (it's interactive), so the home must come
+    # furnished — and node's apt source is provisioning-only, so it can't be added after the fact.
+    provision_agent_cli: bool = False
 
 
 def resolve(flavor: Flavor, llm: str, extra_allow: Iterable[str] = (), audit: bool = False) -> FlavorSpec:
@@ -120,10 +140,16 @@ def resolve(flavor: Flavor, llm: str, extra_allow: Iterable[str] = (), audit: bo
         # Egress-locked to the LLM endpoint + the registries a dev genuinely needs (clone/install),
         # like builder — kept at runtime because dev work is ongoing, not one provisioning burst.
         # PERSISTENT: it survives, and a stray `down` won't delete it.
+        # AUTH hosts are runtime (the operator logs in with their own account while working), and kept
+        # in provisioning too so the set only ever narrows. The agent CLI is installed at provisioning.
+        auth_hosts = LLM_AUTH_ENDPOINTS.get(llm, ())
         provisioning = tuple(sorted(
-            set(DEBIAN_SETUP) | set(NODE_SETUP) | set(BUILDER_REGISTRIES) | set(llm_hosts) | set(extra)
+            set(DEBIAN_SETUP) | set(NODE_SETUP) | set(BUILDER_REGISTRIES)
+            | set(llm_hosts) | set(auth_hosts) | set(extra)
         ))
-        runtime = tuple(sorted(set(BUILDER_REGISTRIES) | set(llm_hosts) | set(extra)))
+        runtime = tuple(sorted(
+            set(BUILDER_REGISTRIES) | set(llm_hosts) | set(auth_hosts) | set(extra)
+        ))
         return FlavorSpec(
             name="dev",
             llm=llm,
@@ -134,6 +160,7 @@ def resolve(flavor: Flavor, llm: str, extra_allow: Iterable[str] = (), audit: bo
             permission_mode="skip-permissions",
             needs_secret=False,
             persistent=True,
+            provision_agent_cli=True,
         )
 
     raise ValueError(f"unknown flavor {flavor!r}")

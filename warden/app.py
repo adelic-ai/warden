@@ -21,6 +21,7 @@ from warden.idmap import Idmap, assert_unprivileged, derive_idmap
 from warden.incus import ExecResult, IncusClient, IncusCommandError
 from warden.proxy import ProxyAllowlistController
 from warden.standing_rules import render_standing_rules, standing_rules_filename
+from warden import workload
 
 CLEAN_SNAPSHOT = "clean"
 REPO_PATH = "/root/repo"
@@ -278,6 +279,14 @@ class WardenApp:
             ["sh", "-c", "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends git ca-certificates"],
             "apt-get install git",
         )
+        # `dev` is interactive — it has no run step to install the agent CLI, and node's apt source is
+        # provisioning-only, so the home is furnished here, once, while the wide allowlist is active.
+        if cfg.spec.provision_agent_cli:
+            self._exec_ok(
+                cfg,
+                ["sh", "-c", workload.runtime_spec(cfg.llm).install_script()],
+                f"install {cfg.llm} CLI",
+            )
 
     def _clone_repo(self, cfg: WardenConfig) -> None:
         assert cfg.repo_url is not None
