@@ -37,7 +37,9 @@ LLM_AUTH_ENDPOINTS: dict[str, tuple[str, ...]] = {
         "www.googleapis.com",
         "cloudcode-pa.googleapis.com",
     ),
-    "claude": ("claude.ai", "console.anthropic.com"),
+    # Claude Code drives its API + subscription auth through platform.claude.com (its newer unified
+    # host), not just api.anthropic.com — a bare API allowlist 403s the login. Confirmed empirically.
+    "claude": ("claude.ai", "console.anthropic.com", "platform.claude.com"),
 }
 
 # One-time setup domains — needed to install the LLM CLI and its

@@ -44,6 +44,7 @@ def test_dev_egress_reaches_interactive_login_hosts():
     assert "cloudcode-pa.googleapis.com" in gemini.runtime_allowlist  # free-tier Code Assist API
     claude = resolve(Flavor.DEV, "claude")
     assert "claude.ai" in claude.runtime_allowlist                 # subscription login
+    assert "platform.claude.com" in claude.runtime_allowlist       # Claude Code's unified API/auth host
     # workloads authenticate with an injected key, so they must NOT carry the login hosts.
     assert "accounts.google.com" not in resolve(Flavor.MONITORED, "gemini").runtime_allowlist
 
