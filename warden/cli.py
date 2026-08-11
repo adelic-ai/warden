@@ -9,11 +9,13 @@ parsing and adapter construction.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
 from warden import profiles, workload
-from warden.app import ProvisioningError, WardenApp
+from warden.app import PersistentInstanceError, ProvisioningError, WardenApp
+from warden.privilege import elevate
 from warden.auditd import CaptureNotProvenError, RealAuditRuleInstaller, RealEventSource
 from warden.config import NeedsHumanError, build_config, resolve_llm_auth
 from warden.example_prompt import EXAMPLE_PROMPT
@@ -100,6 +102,25 @@ def build_parser() -> argparse.ArgumentParser:
     down = sub.add_parser("down", help="remove a sandboxed instance (host substrate is unchanged)")
     down.add_argument("instance")
     down.add_argument("--project", default="warden")
+    down.add_argument("--force", action="store_true",
+                      help="delete even a persistent dev home (otherwise refused — Fork P)")
+
+    dev = sub.add_parser(
+        "dev",
+        help="stand up (or reuse) your persistent free-form dev home — key-free, egress-locked, "
+             "audited — and drop into a shell inside it",
+    )
+    dev.add_argument("--name", default="warden-dev", help="dev home instance (default: warden-dev)")
+    dev.add_argument("--llm", choices=["claude", "gemini"], required=True,
+                     help="scopes egress to this LLM's endpoint; you bring your own auth inside")
+    dev.add_argument("--project", default="warden")
+    dev.add_argument("--mem", default="4GiB")
+    dev.add_argument("--cpu", default="2")
+    dev.add_argument("--allow", action="append", default=[], dest="extra_allow", metavar="DOMAIN")
+    dev.add_argument("--allowlist-file", type=Path, default=DEFAULT_ALLOWLIST_FILE)
+    dev.add_argument("--pool", default=profiles.STORAGE_POOL)
+    dev.add_argument("--no-shell", action="store_true",
+                     help="just ensure the home is up; do not exec a shell into it")
 
     proxy = sub.add_parser(
         "proxy",
@@ -362,12 +383,61 @@ def _down(args: argparse.Namespace) -> int:
     # that uid range gets captured under a dead instance's key.
     app = WardenApp(client, audit_installer=RealAuditRuleInstaller())
     try:
-        removed = app.down(args.instance, args.project)
+        removed = app.down(args.instance, args.project, force=args.force)
     except IncusNotFoundError as exc:
         print(f"NEEDS-HUMAN: {exc}", file=sys.stderr)
         return 2
+    except PersistentInstanceError as exc:
+        print(f"refused: {exc}", file=sys.stderr)
+        return 1
     print(f"down: {args.instance} removed={removed}")
     return 0
+
+
+def _dev(args: argparse.Namespace) -> int:
+    cfg = build_config(
+        instance=args.name, flavor="dev", llm=args.llm, host="local",
+        project=args.project, mem=args.mem, cpu=args.cpu, extra_allow=args.extra_allow,
+    )
+    args.allowlist_file.parent.mkdir(parents=True, exist_ok=True)
+    app = WardenApp(
+        RealIncusClient(),
+        audit_installer=RealAuditRuleInstaller(),
+        event_source_factory=lambda inst: RealEventSource(inst),
+        proxy_controller=RealProxyAllowlistController(
+            args.allowlist_file, bind=profiles.BRIDGE_GATEWAY, port=profiles.PROXY_PORT
+        ),
+        pool=args.pool,
+    )
+    try:
+        # up() is idempotent, so auto-recover a mid-up wedge and retry — the daily home must never
+        # lock you out (ROADMAP: reliability = SLA). No key gate: `dev` is needs_secret=False.
+        result = run_with_recovery(
+            app.client, lambda: app.up(cfg),
+            instance=cfg.instance, project=cfg.project,
+            log=lambda m: print(m, file=sys.stderr),
+        )
+    except IncusNotFoundError as exc:
+        print(f"NEEDS-HUMAN: {exc}", file=sys.stderr)
+        return 2
+    except SubstrateUnrecovered as exc:
+        print(f"NEEDS-HUMAN: {exc}", file=sys.stderr)
+        return 2
+    except (IncusCommandError, ProvisioningError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"dev: {result.instance} up (created={result.created}, persistent, key-free)", file=sys.stderr)
+    enter = f"sudo incus exec {result.instance} --project {args.project} -- bash -l"
+    if args.no_shell:
+        print(f"dev: home ready — enter with: {enter}")
+        return 0
+    # Hand the terminal to an interactive login shell inside the home. os.execvp REPLACES warden, so
+    # you ARE in the container until you exit; on exit, control returns to your host shell.
+    print(f"dev: entering {result.instance} … (exit the shell to return)", file=sys.stderr)
+    argv = elevate(["incus", "exec", result.instance, "--project", args.project, "--", "bash", "-l"])
+    os.execvp(argv[0], argv)
+    return 0  # unreachable — execvp replaces the process
 
 
 def _proxy(args: argparse.Namespace) -> int:
@@ -468,6 +538,8 @@ def main(argv: list[str] | None = None) -> int:
         return _export(args)
     if args.command == "down":
         return _down(args)
+    if args.command == "dev":
+        return _dev(args)
     if args.command == "restore":
         return _restore(args)
     if args.command == "verify":

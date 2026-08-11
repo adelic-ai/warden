@@ -24,10 +24,18 @@ from warden.standing_rules import render_standing_rules, standing_rules_filename
 
 CLEAN_SNAPSHOT = "clean"
 REPO_PATH = "/root/repo"
+# Set on a `dev` instance at `up`; `down` refuses to delete an instance carrying it without --force,
+# so the operator's persistent daily home can't be lost to a stray teardown (Fork P).
+PERSISTENT_KEY = "user.warden.persistent"
 # Restore has to rewrite volatile.idmap.*, which `restricted=true` blocks by
 # implying restricted.containers.lowlevel=block. Opened for the duration of
 # one restore and closed again — never left on. See DECISIONS.md "D16".
 LOWLEVEL_KEY = "restricted.containers.lowlevel"
+
+
+class PersistentInstanceError(RuntimeError):
+    """A `down` was refused because the instance is a persistent (dev) home. Re-run with force to
+    delete it anyway. Exists so the operator's daily environment survives a stray teardown (Fork P)."""
 
 
 class ProvisioningError(RuntimeError):
@@ -295,8 +303,10 @@ class WardenApp:
         # Raises NeedsHumanError if a real run can't proceed. The secret FILE is checked, not just
         # the environment: `warden up --secret-file …` passed the CLI's pre-check and then failed
         # here on any host without `GEMINI_API_KEY` also exported, because this call could not see
-        # the flag. See DECISIONS D26.
-        resolve_llm_auth(cfg.llm, secret_file=cfg.secret_file)
+        # the flag. See DECISIONS D26. The `dev` flavor is key-free (needs_secret=False): the operator
+        # authenticates their own agent interactively, so there is nothing for warden to inject or gate on.
+        if cfg.spec.needs_secret:
+            resolve_llm_auth(cfg.llm, secret_file=cfg.secret_file)
 
         self.ensure_substrate(cfg)
 
@@ -304,6 +314,9 @@ class WardenApp:
         if created:
             profile_name = profiles.build_profile(cfg.spec.name).name
             self.client.launch(profiles.IMAGE, cfg.instance, cfg.project, profile_name)
+        # Mark a persistent (dev) home so a stray `down` refuses to delete it without --force (Fork P).
+        if cfg.spec.persistent:
+            self.client.config_set(cfg.instance, PERSISTENT_KEY, "true", project=cfg.project)
 
         # Stale rules from instances that no longer exist would shadow this
         # one if they overlap its uid range — see auditd.prune / D14.
@@ -380,14 +393,26 @@ class WardenApp:
         return self._wire_auditd(cfg, idmap)
 
     # -- down ---------------------------------------------------------------
-    def down(self, instance: str, project: str) -> bool:
+    def down(self, instance: str, project: str, *, force: bool = False) -> bool:
         """Removes only the instance. The shared substrate (project,
         profile, network, ACL, proxy allowlist) is left alone — see
         DECISIONS.md.
 
         The instance's audit rule is *not* shared substrate: leaving it
         behind is what let a dead instance's rule capture a live one's
-        execs under the wrong key."""
+        execs under the wrong key.
+
+        A persistent (dev) home is refused unless `force` — it is the operator's daily
+        environment, and a stray `down` must not silently delete it (Fork P)."""
+        if (
+            not force
+            and self.client.instance_exists(instance, project)
+            and self.client.config_get(instance, PERSISTENT_KEY, project=project) == "true"
+        ):
+            raise PersistentInstanceError(
+                f"{instance} is a persistent dev home — refusing to delete it. Re-run with --force "
+                "if you really mean to destroy it."
+            )
         if self.audit_installer is not None:
             self.audit_installer.uninstall(instance)
         if not self.client.instance_exists(instance, project):

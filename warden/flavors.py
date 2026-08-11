@@ -14,6 +14,7 @@ from typing import Iterable
 class Flavor(str, Enum):
     MONITORED = "monitored"
     BUILDER = "builder"
+    DEV = "dev"
 
 
 # Domain allowlists, not CIDRs — verified against the LLM's actual
@@ -52,6 +53,12 @@ class FlavorSpec:
     auditd_wired: bool
     permission_mode: str  # "gated" | "skip-permissions"
     snapshot: bool = True
+    # False for `dev`: it is the operator's interactive home — they authenticate their own agent, so
+    # warden injects no key and `up` does not gate on `resolve_llm_auth`.
+    needs_secret: bool = True
+    # True for `dev`: the persistent daily home. Marked on the instance so a stray `warden down`
+    # refuses to delete it without --force (Fork P). Workload/monitored instances stay throwaway.
+    persistent: bool = False
 
 
 def resolve(flavor: Flavor, llm: str, extra_allow: Iterable[str] = (), audit: bool = False) -> FlavorSpec:
@@ -104,6 +111,29 @@ def resolve(flavor: Flavor, llm: str, extra_allow: Iterable[str] = (), audit: bo
             repo_git=True,
             auditd_wired=audit,
             permission_mode="skip-permissions",
+        )
+
+    if flavor is Flavor.DEV:
+        # The free-form daily HOME (ROADMAP step 1). Interactive: the operator drives their own agent
+        # with their own auth — NO injected key (needs_secret=False). Audited (auditd_wired=True): the
+        # dev container is where agentwatch earns trust, the unforgeable plane in the VM around it.
+        # Egress-locked to the LLM endpoint + the registries a dev genuinely needs (clone/install),
+        # like builder — kept at runtime because dev work is ongoing, not one provisioning burst.
+        # PERSISTENT: it survives, and a stray `down` won't delete it.
+        provisioning = tuple(sorted(
+            set(DEBIAN_SETUP) | set(NODE_SETUP) | set(BUILDER_REGISTRIES) | set(llm_hosts) | set(extra)
+        ))
+        runtime = tuple(sorted(set(BUILDER_REGISTRIES) | set(llm_hosts) | set(extra)))
+        return FlavorSpec(
+            name="dev",
+            llm=llm,
+            provisioning_allowlist=provisioning,
+            runtime_allowlist=runtime,
+            repo_git=False,
+            auditd_wired=True,
+            permission_mode="skip-permissions",
+            needs_secret=False,
+            persistent=True,
         )
 
     raise ValueError(f"unknown flavor {flavor!r}")
