@@ -22,6 +22,7 @@ from warden.incus import ExecResult, IncusClient, IncusCommandError
 from warden.proxy import ProxyAllowlistController
 from warden.standing_rules import render_standing_rules, standing_rules_filename
 from warden import workload
+from warden.report import PROVISIONED_AT_KEY
 
 CLEAN_SNAPSHOT = "clean"
 REPO_PATH = "/root/repo"
@@ -364,6 +365,12 @@ class WardenApp:
 
         if cfg.spec.snapshot and not self.client.snapshot_exists(cfg.instance, CLEAN_SNAPSHOT, cfg.project):
             self.client.snapshot(cfg.instance, CLEAN_SNAPSHOT, project=cfg.project)
+
+        # Stamp the furnishing->interactive boundary a live reconcile needs (a persistent dev home has
+        # no run manifest to carry a `started_at`). Only on create, and only for a persistent home: a
+        # re-entry (created=False) must not move the boundary and re-label the whole session as setup.
+        if cfg.spec.persistent and created:
+            self.client.config_set(cfg.instance, PROVISIONED_AT_KEY, str(time.time()), project=cfg.project)
 
         if self.proxy_controller is not None:
             # narrow provisioning -> runtime (never disables the ACL, just

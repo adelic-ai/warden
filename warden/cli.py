@@ -11,7 +11,9 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import time
 from pathlib import Path
+from typing import Optional
 
 from warden import profiles, workload
 from warden.app import PersistentInstanceError, ProvisioningError, WardenApp
@@ -23,7 +25,15 @@ from warden.incus import IncusCommandError, IncusNotFoundError, RealIncusClient
 from warden.proxy import RealProxyAllowlistController, run_forever
 from warden.recover import SubstrateUnrecovered, diagnose_and_recover, run_with_recovery
 from warden.export import Exporter
-from warden.report import REPORT_NAME, ReportError, Reporter, render
+from warden.report import (
+    PROVISIONED_AT_KEY,
+    REPORT_NAME,
+    ReportError,
+    Reporter,
+    live_manifest,
+    parse_since,
+    render,
+)
 from warden.workload import MANIFEST_NAME, RunManifest, WorkloadError, WorkloadRunner, run_dir_for
 
 DEFAULT_ALLOWLIST_FILE = Path.home() / ".warden" / "allowlist.txt"
@@ -85,6 +95,16 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("--instance", default=None, help="defaults to warden-<flavor>")
     report.add_argument("--flavor", choices=["monitored", "builder"], default="builder")
     report.add_argument("--llm", choices=["claude", "gemini"], required=True)
+    report.add_argument(
+        "--live", action="store_true",
+        help="reconcile a persistent `dev` home that has no run manifest — scope from the live "
+             "instance and a --since window instead. Forces --flavor dev.",
+    )
+    report.add_argument(
+        "--since", default=None,
+        help="live only: window of lookback (e.g. 45m, 2h, 3d) or an absolute epoch. Defaults to the "
+             "home's recorded provisioning time; refuses to guess if neither is available.",
+    )
     report.add_argument("--project", default="warden")
     report.add_argument("--audit", action="store_true", default=True,
                         help="(implied — report requires the ground-truth plane)")
@@ -303,28 +323,58 @@ def _run(args: argparse.Namespace) -> int:
     return 0
 
 
+def _resolve_live_since(client, cfg, since_arg: Optional[str]) -> float:
+    """The `--since` epoch for a live reconcile. Explicit relative/epoch wins; else the home's
+    recorded provisioning time; else refuse — `report` does not guess a window (same rule as the
+    workload path, which requires a manifest)."""
+    if since_arg:
+        rel = parse_since(since_arg)
+        if rel is not None:
+            return time.time() - rel
+        try:
+            return float(since_arg)
+        except ValueError:
+            raise ReportError(
+                f"--since {since_arg!r} is neither a window (45m/2h/3d) nor an epoch."
+            )
+    stamped = client.config_get(cfg.instance, PROVISIONED_AT_KEY, project=cfg.project)
+    if stamped:
+        return float(stamped)
+    raise ReportError(
+        f"{cfg.instance} has no recorded provisioning time and no --since was given. A live "
+        "reconcile will not guess a window — pass --since (e.g. --since 1h)."
+    )
+
+
 def _report(args: argparse.Namespace) -> int:
-    instance = args.instance or f"warden-{args.flavor}"
+    live = getattr(args, "live", False)
+    flavor = "dev" if live else args.flavor
+    instance = args.instance or f"warden-{flavor}"
     cfg = build_config(
-        instance=instance, flavor=args.flavor, llm=args.llm,
+        instance=instance, flavor=flavor, llm=args.llm,
         project=args.project, audit=True,
     )
     out = run_dir_for(args.out, cfg.project, cfg.instance)
-    manifest_path = out / MANIFEST_NAME
-    if not manifest_path.exists():
-        print(
-            f"error: no run manifest at {manifest_path} — run `warden run` first. "
-            "`report` scopes itself from the manifest and will not guess a window.",
-            file=sys.stderr,
-        )
-        return 1
 
     reporter = Reporter(
         RealIncusClient(),
         event_source_factory=lambda inst: RealEventSource(inst),
     )
     try:
-        summary = reporter.report(cfg, RunManifest.load(manifest_path), out, host=args.host)
+        if live:
+            since = _resolve_live_since(reporter.client, cfg, args.since)
+            manifest = live_manifest(reporter.client, cfg, since=since, out_dir=out)
+        else:
+            manifest_path = out / MANIFEST_NAME
+            if not manifest_path.exists():
+                print(
+                    f"error: no run manifest at {manifest_path} — run `warden run` first. "
+                    "`report` scopes itself from the manifest and will not guess a window.",
+                    file=sys.stderr,
+                )
+                return 1
+            manifest = RunManifest.load(manifest_path)
+        summary = reporter.report(cfg, manifest, out, host=args.host)
     except IncusNotFoundError as exc:
         print(f"NEEDS-HUMAN: {exc}", file=sys.stderr)
         return 2

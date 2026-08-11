@@ -50,6 +50,7 @@ import os
 import socket
 import subprocess
 import sys
+import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -58,7 +59,7 @@ from warden import auditd
 from warden.config import WardenConfig
 from warden.idmap import Idmap, derive_idmap
 from warden.incus import IncusClient
-from warden.workload import RunManifest
+from warden.workload import RUN_MANIFEST_SCHEMA_VERSION, RunManifest, runtime_spec
 
 #: Bumped only for a breaking change to `report.json`. Same reasoning as the run manifest: §10
 #: wants these outputs stable and versioned because they are the corpus the calibration layers
@@ -139,6 +140,63 @@ def _import_agentwatch():
         "on PYTHONPATH, `pip install -e` it, set WARDEN_AGENTWATCH_PATH, or check it out beside this "
         "repo as ./agentwatch."
     ) from last_exc
+
+
+# --- live reconcile of a persistent dev home (no run manifest) -------------------------------
+
+#: Stamped on a persistent `dev` home when `up` finishes provisioning it. It is the phase boundary
+#: a live reconcile needs and a workload gets from the run manifest's `started_at`: execs before it
+#: are the one-time furnishing (node/npm/apt), execs after it are the interactive session — the
+#: accountable window. Kept on the instance so it survives across sessions, like the home itself.
+PROVISIONED_AT_KEY = "user.warden.provisioned_at"
+
+_SINCE_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+
+
+def parse_since(spec: str) -> Optional[float]:
+    """A `--since` window as seconds-of-lookback, e.g. `45m`, `2h`, `3d`. Returns None if unparseable
+    (an absolute epoch is handled by the caller). Deliberately tiny: the point is a window, not a
+    date library."""
+    spec = spec.strip()
+    if len(spec) >= 2 and spec[-1] in _SINCE_UNITS and spec[:-1].isdigit():
+        return int(spec[:-1]) * _SINCE_UNITS[spec[-1]]
+    return None
+
+
+def live_manifest(client: IncusClient, cfg: WardenConfig, *, since: float, out_dir: Path) -> RunManifest:
+    """Synthesize the manifest `report` needs from a LIVE dev home, so the free-form loop reconciles
+    through the exact same engine a workload does — no second reconciler, no lowered honesty bar.
+
+    The only real inputs are the derived idmap (never frozen — re-derived here as everywhere) and the
+    `since` boundary that plays the role a workload's `started_at` plays: the split between the
+    one-time furnishing and the interactive session. `ended_at` is now. Everything else is either a
+    constant of the dev flavor (auditd wired, no injected secret) or looked up from the runtime spec
+    (the transcript glob, which for Claude Code is where it writes interactively too)."""
+    idmap = derive_idmap(client, cfg.instance, project=cfg.project)
+    spec = runtime_spec(cfg.llm)
+    return RunManifest(
+        schema_version=RUN_MANIFEST_SCHEMA_VERSION,
+        instance=cfg.instance,
+        project=cfg.project,
+        llm=cfg.llm,
+        flavor="dev",
+        auditd_wired=True,
+        agentwatch_runtime=spec.agentwatch_runtime,
+        prompt="(interactive dev home — no single prompt; reconciled over a --since window)",
+        prompt_source="interactive",
+        prompt_sha256="",
+        llm_version=None,
+        started_at=since,
+        ended_at=time.time(),
+        returncode=0,
+        timed_out=False,
+        idmap_uid_start=idmap.uid.host_start,
+        idmap_uid_end=idmap.uid.host_end,
+        transcript_glob=spec.transcript_glob,
+        workdir="/root",
+        run_dir=str(out_dir),
+        secret_source=None,
+    )
 
 
 # --- the privileged collector (DESIGN §4) ---------------------------------------------------
