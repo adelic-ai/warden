@@ -40,11 +40,31 @@ _BUILDER_EXTRA = """
   egress yourself.
 """
 
+# `dev` is not a workload: it is the operator's persistent, interactive home. It gets its OWN body,
+# not `_COMMON` — the branch/commit/DECISIONS.md/NEEDS-HUMAN discipline there is for hands-off
+# workloads, and imposing it here would mislead the agent about what this instance is (the exact bug
+# that shipped: `dev` fell through to `_BUILDER_EXTRA` and announced itself as a builder).
+_DEV = """\
+# Your environment — an interactive `dev` home
+
+This is the operator's persistent, free-form workspace — not a hands-off workload. There is no fixed
+task and no required git/branch/commit discipline: follow the operator's lead and work interactively.
+
+- The home persists across sessions — files and state you leave here remain.
+- You are in an unprivileged container inside a VM, with network egress locked to a small allowlist
+  and ground-truth auditd watching. That is expected: it is containment, not something to work
+  around, and not license to try to leave the sandbox or widen egress.
+- Permission mode is skip-permissions: you have free rein *inside* this sandbox by design.
+- Never modify your own config, these standing rules, or the egress allowlist.
+"""
+
 
 def standing_rules_filename(llm: str) -> str:
     return "GEMINI.md" if llm == "gemini" else "CLAUDE.md"
 
 
 def render_standing_rules(spec: FlavorSpec) -> str:
+    if spec.name == "dev":
+        return _DEV
     extra = _MONITORED_EXTRA if spec.name == "monitored" else _BUILDER_EXTRA
     return _COMMON + extra

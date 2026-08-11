@@ -5,6 +5,7 @@ import pytest
 from warden.app import PERSISTENT_KEY, PersistentInstanceError, WardenApp
 from warden.config import build_config
 from warden.flavors import Flavor, resolve
+from warden.standing_rules import render_standing_rules
 from tests.fakes import (
     FakeAuditRuleInstaller,
     FakeEventSource,
@@ -47,6 +48,19 @@ def test_dev_egress_reaches_interactive_login_hosts():
     assert "platform.claude.com" in claude.runtime_allowlist       # Claude Code's unified API/auth host
     # workloads authenticate with an injected key, so they must NOT carry the login hosts.
     assert "accounts.google.com" not in resolve(Flavor.MONITORED, "gemini").runtime_allowlist
+
+
+def test_dev_standing_rules_describe_an_interactive_home_not_a_builder_workload():
+    # The bug that shipped: dev fell through to the builder body and told the agent it was a builder
+    # with git-push/branch/DECISIONS.md workload discipline. dev is the operator's interactive home.
+    rules = render_standing_rules(resolve(Flavor.DEV, "claude"))
+    assert "builder" not in rules
+    assert "DECISIONS.md" not in rules and "NEEDS-HUMAN" not in rules   # workload discipline, not dev
+    assert "interactive" in rules and "persist" in rules
+    # the containment facts still belong here — the agent must know egress/audit are expected.
+    assert "egress" in rules and "auditd" in rules
+    # builder still gets its own body (no regression).
+    assert "builder" in render_standing_rules(resolve(Flavor.BUILDER, "claude"))
 
 
 def test_non_dev_flavors_still_need_a_key_and_are_not_persistent():
