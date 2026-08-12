@@ -28,6 +28,7 @@ from warden.export import Exporter
 from warden.report import (
     PROVISIONED_AT_KEY,
     REPORT_NAME,
+    SESSION_STARTED_KEY,
     ReportError,
     Reporter,
     live_manifest,
@@ -324,9 +325,9 @@ def _run(args: argparse.Namespace) -> int:
 
 
 def _resolve_live_since(client, cfg, since_arg: Optional[str]) -> float:
-    """The `--since` epoch for a live reconcile. Explicit relative/epoch wins; else the home's
-    recorded provisioning time; else refuse — `report` does not guess a window (same rule as the
-    workload path, which requires a manifest)."""
+    """The `--since` epoch for a live reconcile. Explicit relative/epoch wins; else default to THIS
+    session (stamped by `warden dev` on entry) — the zero-config common case; else the furnishing
+    time; else refuse — `report` does not guess a window (same rule as the workload path)."""
     if since_arg:
         rel = parse_since(since_arg)
         if rel is not None:
@@ -337,12 +338,15 @@ def _resolve_live_since(client, cfg, since_arg: Optional[str]) -> float:
             raise ReportError(
                 f"--since {since_arg!r} is neither a window (45m/2h/3d) nor an epoch."
             )
-    stamped = client.config_get(cfg.instance, PROVISIONED_AT_KEY, project=cfg.project)
-    if stamped:
-        return float(stamped)
+    # Default: this session, then the furnishing boundary — whichever is present and later.
+    for key in (SESSION_STARTED_KEY, PROVISIONED_AT_KEY):
+        stamped = client.config_get(cfg.instance, key, project=cfg.project)
+        if stamped:
+            return float(stamped)
     raise ReportError(
-        f"{cfg.instance} has no recorded provisioning time and no --since was given. A live "
-        "reconcile will not guess a window — pass --since (e.g. --since 1h)."
+        f"{cfg.instance} has no session or provisioning boundary recorded and no --since was given. "
+        "A live reconcile will not guess a window — enter it with `warden dev` (which stamps the "
+        "session), or pass --since (e.g. --since 1h)."
     )
 
 
@@ -482,6 +486,12 @@ def _dev(args: argparse.Namespace) -> int:
     if args.no_shell:
         print(f"dev: home ready — enter with: {enter}")
         return 0
+    # Stamp the session boundary NOW — the last thing before the shell is yours — so warden's own
+    # up execs stay before it and `warden report --live` defaults its window to this session with no
+    # --since and no manual reset. Host-side config_set: it does not exec into the container.
+    app.client.config_set(
+        result.instance, SESSION_STARTED_KEY, str(time.time()), project=args.project
+    )
     # Hand the terminal to an interactive login shell inside the home. os.execvp REPLACES warden, so
     # you ARE in the container until you exit; on exit, control returns to your host shell.
     print(f"dev: entering {result.instance} … (exit the shell to return)", file=sys.stderr)

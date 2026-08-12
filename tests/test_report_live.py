@@ -7,9 +7,18 @@ import time
 
 import pytest
 
+import pytest as _pytest
+
 from warden.app import WardenApp
+from warden.cli import _resolve_live_since
 from warden.config import build_config
-from warden.report import PROVISIONED_AT_KEY, live_manifest, parse_since
+from warden.report import (
+    PROVISIONED_AT_KEY,
+    SESSION_STARTED_KEY,
+    ReportError,
+    live_manifest,
+    parse_since,
+)
 from tests.fakes import (
     FakeAuditRuleInstaller,
     FakeEventSource,
@@ -56,6 +65,34 @@ def test_dev_reentry_does_not_move_the_boundary():
     first = client.config_get("warden-dev", PROVISIONED_AT_KEY, project="warden")
     app.up(cfg)  # re-entry
     assert client.config_get("warden-dev", PROVISIONED_AT_KEY, project="warden") == first
+
+
+def test_live_since_defaults_to_the_session_boundary():
+    # The zero-config common case: `warden dev` stamped the session, so `report --live` needs no
+    # --since. Session wins over the older furnishing boundary.
+    client = FakeIncusClient()
+    cfg = build_config(instance="warden-dev", flavor="dev", llm="claude", project="warden")
+    _app(client).up(cfg)  # stamps provisioning boundary
+    client.config_set("warden-dev", SESSION_STARTED_KEY, "9999.0", project="warden")
+    assert _resolve_live_since(client, cfg, None) == 9999.0
+
+
+def test_live_since_explicit_arg_overrides_the_session():
+    client = FakeIncusClient()
+    cfg = build_config(instance="warden-dev", flavor="dev", llm="claude", project="warden")
+    _app(client).up(cfg)
+    client.config_set("warden-dev", SESSION_STARTED_KEY, "9999.0", project="warden")
+    # an absolute epoch is taken literally; a relative window is now-anchored (not the session value).
+    assert _resolve_live_since(client, cfg, "123.0") == 123.0
+    assert abs(_resolve_live_since(client, cfg, "1h") - (time.time() - 3600)) < 5
+
+
+def test_live_since_refuses_when_no_boundary_and_no_arg():
+    client = FakeIncusClient()
+    client.launch("images:debian/12", "bare", "warden", "prof")  # no boundary stamped
+    cfg = build_config(instance="bare", flavor="dev", llm="claude", project="warden")
+    with _pytest.raises(ReportError):
+        _resolve_live_since(client, cfg, None)
 
 
 def test_live_manifest_synthesizes_a_reconcilable_manifest():

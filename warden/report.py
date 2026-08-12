@@ -150,6 +150,12 @@ def _import_agentwatch():
 #: accountable window. Kept on the instance so it survives across sessions, like the home itself.
 PROVISIONED_AT_KEY = "user.warden.provisioned_at"
 
+#: Stamped by `warden dev` at the moment it hands you the interactive shell — so warden's own entry
+#: execs (readiness probe, capture marker) fall BEFORE it, and the window is your session's activity
+#: only. This is what makes "reconcile what I did this session" the zero-config default: a live
+#: reconcile scopes to this if present, so no `--since` and no manual boundary reset is needed.
+SESSION_STARTED_KEY = "user.warden.session_started_at"
+
 _SINCE_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
 
 
