@@ -178,15 +178,42 @@ class WardenApp:
         self._ensure_egress()
 
         profile_spec = profiles.build_profile(cfg.spec.name, mem=cfg.mem, cpu=cfg.cpu, pool=self.pool)
-        if not self.client.profile_exists(profile_spec.name, cfg.project):
+        self._ensure_profile(profile_spec, cfg.project)
+
+    def ensure_build_vm_substrate(self, project: str, profile_spec: profiles.ProfileSpec) -> None:
+        """Same pool/project/network/ACL as `ensure_substrate` — egress enforcement is bridge-level
+        (profiles.py/egress.py), so it governs a VM-root build's traffic exactly the way it governs a
+        container's, with nothing VM-specific needed here. Only the profile differs (see
+        `build_vm.build_vm_profile`), and the caller supplies it rather than this method deriving one
+        from a `WardenConfig` — a VM-root build has no `FlavorSpec` (see build_vm.py for why)."""
+        if not self.client.storage_pool_exists(self.pool):
+            self.client.storage_pool_create(self.pool, profiles.STORAGE_DRIVER)
+
+        if not self.client.project_exists(project):
+            self.client.project_create(project, profiles.project_config())
+        else:
+            for key, value in profiles.project_config().items():
+                self.client.project_set(project, key, value)
+
+        if not self.client.network_exists(profiles.BRIDGE_NAME):
+            self.client.network_create(profiles.BRIDGE_NAME, profiles.network_config())
+        else:
+            for key, value in profiles.network_config().items():
+                self.client.network_set(profiles.BRIDGE_NAME, key, value)
+
+        self._ensure_egress()
+        self._ensure_profile(profile_spec, project)
+
+    def _ensure_profile(self, profile_spec: profiles.ProfileSpec, project: str) -> None:
+        if not self.client.profile_exists(profile_spec.name, project):
             self.client.profile_create(
-                profile_spec.name, cfg.project, profile_spec.config, profile_spec.devices
+                profile_spec.name, project, profile_spec.config, profile_spec.devices
             )
         else:
             # An existing profile predating the ACL would leave its
             # instances with no egress policy at all — fail open, silently.
             self.client.profile_device_set(
-                profile_spec.name, cfg.project, "eth0", "security.acls", egress.ACL_NAME
+                profile_spec.name, project, "eth0", "security.acls", egress.ACL_NAME
             )
 
     def _ensure_egress(self) -> None:

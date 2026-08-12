@@ -116,7 +116,7 @@ class IncusClient(Protocol):
     def network_create(self, name: str, config: dict[str, str]) -> None: ...
     def storage_pool_create(self, name: str, driver: str = "btrfs") -> None: ...
     def launch(
-        self, image: str, name: str, project: str, profile: str
+        self, image: str, name: str, project: str, profile: str, instance_type: str = "container"
     ) -> None: ...
 
     # -- convergence: project / network / profile-device settings ------------
@@ -298,14 +298,17 @@ class RealIncusClient:
             args.append(f"{key}={value}")
         self._run_ok(args)
 
-    def launch(self, image: str, name: str, project: str, profile: str) -> None:
+    def launch(
+        self, image: str, name: str, project: str, profile: str, instance_type: str = "container"
+    ) -> None:
         # The long bound is the image download; the bound existing at all is
         # the hung-client hang this whole mechanism exists for.
-        self._run_ok([
-            "launch", image, name,
-            "--project", project,
-            "--profile", profile,
-        ], timeout=LAUNCH_TIMEOUT)
+        if instance_type not in ("container", "virtual-machine"):
+            raise ValueError(f"unknown instance_type {instance_type!r}")
+        args = ["launch", image, name, "--project", project, "--profile", profile]
+        if instance_type == "virtual-machine":
+            args.append("--vm")
+        self._run_ok(args, timeout=LAUNCH_TIMEOUT)
 
     # -- instance ops -----------------------------------------------------
     def config_get(self, name: str, key: str, project: str = "default") -> str:

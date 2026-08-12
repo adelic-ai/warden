@@ -30,12 +30,17 @@ class _Instance:
     project: str
     image: str
     profile: str
+    instance_type: str = "container"
     config: dict[str, str] = field(default_factory=dict)
     snapshots: set[str] = field(default_factory=set)
     running: bool = True
     # Just enough filesystem to model "did the clone actually land?" —
     # the real bug was `git clone` failing silently in an image with no git.
     paths: set[str] = field(default_factory=set)
+    # Pushed file content, as bytes — never decoded/encoded through `config` (a `dict[str, str]`),
+    # which corrupted the first binary push (a gzip'd tarball) with a UnicodeDecodeError. Text and
+    # binary pushes are the same mechanism now; a caller comparing against a string encodes it.
+    files: dict[str, bytes] = field(default_factory=dict)
 
 
 class FakeIncusClient:
@@ -156,7 +161,11 @@ class FakeIncusClient:
             raise IncusCommandError(["network", "create", name], 1, "already exists")
         self.networks[name] = dict(config)
 
-    def launch(self, image: str, name: str, project: str, profile: str) -> None:
+    def launch(
+        self, image: str, name: str, project: str, profile: str, instance_type: str = "container"
+    ) -> None:
+        if instance_type not in ("container", "virtual-machine"):
+            raise ValueError(f"unknown instance_type {instance_type!r}")
         key = (project, name)
         if key in self.instances:
             raise IncusCommandError(["launch", image, name], 1, "already exists")
@@ -166,6 +175,7 @@ class FakeIncusClient:
             project=project,
             image=image,
             profile=profile,
+            instance_type=instance_type,
             config={"volatile.idmap.current": self._idmap_json(host_start)},
         )
 
@@ -227,16 +237,14 @@ class FakeIncusClient:
         self, name: str, content: bytes, remote_path: str, project: str = "default"
     ) -> None:
         inst = self._require_instance(name, project)
-        inst.config.setdefault("_files", {})  # type: ignore[arg-type]
-        inst.config[f"_file:{remote_path}"] = content.decode()
+        inst.files[remote_path] = content
         inst.paths.add(remote_path)
 
     def file_pull(self, name: str, remote_path: str, project: str = "default") -> bytes:
         inst = self._require_instance(name, project)
-        key = f"_file:{remote_path}"
-        if key not in inst.config:
+        if remote_path not in inst.files:
             raise FileNotFoundError(f"{name}:{remote_path}")
-        return inst.config[key].encode()
+        return inst.files[remote_path]
 
     def snapshot(self, name: str, snapshot: str, project: str = "default") -> None:
         inst = self._require_instance(name, project)

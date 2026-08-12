@@ -132,7 +132,7 @@ def test_secret_is_pushed_as_bytes_and_mode_restricted(tmp_path):
 
     inst = client.instances[(cfg.project, cfg.instance)]
     # trailing newline stripped — a key with a newline is a key that fails auth confusingly
-    assert inst.config[f"_file:{SECRET_PATH}"] == SECRET_MATERIAL
+    assert inst.files[SECRET_PATH] == SECRET_MATERIAL.encode()
     assert f"chmod 600 {SECRET_PATH}" in _joined_execs(client)
 
 
@@ -164,7 +164,7 @@ def test_prompt_is_pushed_as_a_file_not_interpolated_into_the_shell():
     _runner(client).run(cfg, nasty)
 
     inst = client.instances[(cfg.project, cfg.instance)]
-    assert inst.config[f"_file:{PROMPT_PATH}"] == nasty
+    assert inst.files[PROMPT_PATH] == nasty.encode()
     assert nasty not in _joined_execs(client)
     assert f'"$(cat {PROMPT_PATH})"' in _joined_execs(client)
 

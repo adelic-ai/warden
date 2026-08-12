@@ -99,6 +99,30 @@ def test_exec_timeout_is_overridable_for_probes(monkeypatch, incus_on_path):
     assert rec.timeouts == [5.0]
 
 
+def test_launch_defaults_to_a_container_no_vm_flag(monkeypatch, incus_on_path):
+    rec = _Recorder()
+    monkeypatch.setattr(subprocess, "run", rec)
+    RealIncusClient().launch("images:debian/12", "cap-mon", "warden", "warden-monitored")
+    assert "--vm" not in rec.argvs[0]
+
+
+def test_launch_virtual_machine_passes_vm_flag(monkeypatch, incus_on_path):
+    rec = _Recorder()
+    monkeypatch.setattr(subprocess, "run", rec)
+    RealIncusClient().launch(
+        "images:debian/12", "build-vm", "warden", "warden-build-vm",
+        instance_type="virtual-machine",
+    )
+    assert "--vm" in rec.argvs[0]
+
+
+def test_launch_rejects_unknown_instance_type(incus_on_path):
+    with pytest.raises(ValueError):
+        RealIncusClient().launch(
+            "images:debian/12", "cap-mon", "warden", "warden-monitored", instance_type="bogus"
+        )
+
+
 def test_a_hang_raises_rather_than_reading_as_absent(monkeypatch, incus_on_path):
     """The load-bearing half. Existence checks read `.returncode`, so a
     timeout that *returned* would silently become "doesn't exist" and send
