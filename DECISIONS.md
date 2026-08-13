@@ -620,9 +620,10 @@ fork gap `DEMO-SPEC.md §7` already forbids presenting as *caught*.
 
 **Decision:** (1) auditd stays the shipping plane *for now* — it is portable (the `clone`-not-`fork`
 arch-portability reasoning in `auditd.py` is why) and adequate for the shell-out case `§7` scopes recall
-to; (2) the fork-gap blindness is **disclosed** in README/QUICKSTART, never hidden; (3) **eBPF
-(cgroup-labeled) process-lifecycle capture is the validated target and a tracked ROADMAP obligation** —
-integration, not research, since it is already measured; (4) it must land **with a test** pinning a
+to; (2) the fork-gap blindness is **disclosed** in README/QUICKSTART, never hidden; (3) **fusing eBPF
+lineage + cgroup keying into the evidence model (alongside auditd, NOT replacing it) + wiring canon for
+the fidelity attestation is the validated target and a tracked ROADMAP obligation** — integration, not
+research, since it is already measured; (4) it must land **with a test** pinning a
 fork-gap verdict, because "a validated finding with no in-repo test" is exactly the failure that let this
 ship. The `matched = matched_pid is not None` UNEVALUABLE accounting (elsewhere in this log) is the
 report-side companion; note also that `report.py`'s `not_evaluated_by_comm` currently omits unevaluable

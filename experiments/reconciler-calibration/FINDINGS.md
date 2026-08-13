@@ -70,7 +70,9 @@ so a host-root fork into the container is a permanent blind spot. Ranked honestl
   at all** (scoping is uid-keyed).
 - **(c) non-root agent uid (ROADMAP step 1b) — helps this case.** If the agent is `dev` and injections
   run as `root`, uid separates them, sidestepping the ancestry walk for operator/host-root injection.
-- **(d) eBPF (cgroup-labeled) — the complete instrument, ALREADY VALIDATED, NOT integrated into warden.**
+- **(d) eBPF lineage + cgroup — the fork-gap-closing inputs to the FUSED evidence model, ALREADY
+  VALIDATED, NOT integrated.** (*Not* a replacement for auditd — fused *with* auditd's exec semantics +
+  cgroup scope into one `GroundTruthEvent` stream; see `CANONICAL-SHAPE.md`.)
   An eBPF program on `sched_process_fork`/`sched_process_exec` captures *every* process creation —
   including incusd's host-root fork into the container — with cgroup attached, independent of
   uid-filtering. This is **not speculative**: the CageTheAgent testbed already prototyped and *measured*

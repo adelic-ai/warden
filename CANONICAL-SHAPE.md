@@ -23,7 +23,8 @@ this one invariant.
 The agent produces exactly **one, forgeable** thing: its **self-report** (the transcript — its claimed
 tool calls). Against it stand **two host-side, unforgeable planes** the agent cannot reach:
 
-1. **Process-lifecycle** — the kernel's record of every `exec`/`fork` (auditd today; eBPF the target).
+1. **Process-lifecycle** — the kernel's record of every `exec`/`fork` (auditd today; the target is the
+   *fused* evidence model below — auditd + eBPF + cgroups, not eBPF alone).
    *"What did it run."* This is where the reconciliation deep-work lives (scope, verdicts, the fork gap).
 2. **Network egress** — the host-side proxy chokepoint. *"What did it try to reach."* Deny-by-default
    (**containment**) **and** an unforgeable log the agent can't touch (**observation**). Today warden

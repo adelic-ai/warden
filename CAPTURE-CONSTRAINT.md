@@ -41,7 +41,13 @@ capture bridges *in-container* fork-without-exec (e.g. a Gemini persistent bridg
   vector** (double-fork / cross-namespace injection is unattributable by construction).
 - **pty-spawned work** — the 0/11 case above.
 
-## The validated target: `host-side process-lifecycle telemetry keyed by cgroup`
+## The validated target: a FUSED evidence model, keyed by cgroup
+
+**Not "eBPF replaces auditd."** The evidence model *fuses* three complementary sources — auditd (exec
+semantics) + eBPF `sched_process_fork`/`_exec` (lineage, closing the fork gap) + cgroups (scope key) —
+into one `GroundTruthEvent` stream (see `CANONICAL-SHAPE.md`). The briefing's cruder "use eBPF and/or
+cgroup, *not* auditd" phrasing is superseded by this fusion: auditd stays for its semantics; eBPF and
+cgroup are *added*, not swapped in.
 
 Define the invariant as **host-side process-lifecycle telemetry keyed by cgroup membership.** Any runtime
 that yields a cgroup on a kernel we own satisfies it. Concretely: an eBPF program on
@@ -59,8 +65,9 @@ for the operator-vs-agent distinction.
 
 1. **Disclose, per `DEMO-SPEC.md §7`.** Until integrated, warden's shipping docs must state the capture is
    fork-gap-blind (auditd-execve), never present a fork-gap event as caught. (README / QUICKSTART.)
-2. **Integrate eBPF (cgroup-labeled) process-lifecycle capture** as the ground-truth plane — the tracked
-   ROADMAP item. It closes the pty gap, the host-root-injection gap, and the evasion vector.
+2. **Fuse eBPF lineage + cgroup keying INTO the evidence model** (alongside auditd's exec semantics), and
+   **wire canon** so the residual-gap `fidelity_attestation` flows — the tracked ROADMAP item. It closes
+   the pty gap, the host-root-injection gap, and the evasion vector.
 3. **Guard it with a test** — the failure mode that let this ship was a validated finding living outside
    the repo with no test. A fork-gap scenario must have a test that pins its verdict, so a regression
    fails loudly instead of rotting silently.
