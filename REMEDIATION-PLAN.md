@@ -37,19 +37,32 @@ core is **agentwatch** — this plan is the cross-repo source of truth; items ar
 
 ## Phase 2 — the capture upgrade (the real fix; spans both)
 
-- **`[warden/capture]` eBPF (cgroup-labeled) process-lifecycle telemetry.** Add an eBPF
-  `sched_process_fork`/`sched_process_exec` probe (de-risked: measured 9/11 + cgroup vs auditd-execve's
-  0/11) producing cgroup-labeled events; auditd can stay as a portable fallback. **Done when:** the
-  pty-spawned and host-root-injected cases are captured (0/11 → 11/11 on the same build).
-- **`[agentwatch/runtime_scope]` cgroup-keyed scoping.** Consume **cgroup membership** as the scope key
-  instead of relying on the ancestry walk; the ancestry walk becomes a fallback/cross-check, not the
-  sole basis. **Done when:** an injected exec is scoped by cgroup (in/out of session) rather than left
-  `unevaluable` for lack of walkable ancestry.
-- **`[both/contract]` Update the telemetry contract** (warden emits ↔ agentwatch consumes) for the
-  richer, cgroup-labeled events — the one place the two repos must land together.
-- **`[both/test]` Fork-gap acceptance test.** A pty-spawned or host-root-injected exec must receive a
-  *verdict*, not `unevaluable`. This is the guard that was missing — a validated finding with no in-repo
-  test is what let the gap ship. **Done when:** the test exists and fails on regression.
+Per `CANONICAL-SHAPE.md`, this is a **fusion + an attestation stage**, *not* "eBPF replaces auditd." The
+evidence model fuses three complementary sources into one `GroundTruthEvent` stream, and canon attests its
+fidelity. The implementation shipped **one** source (auditd) and **skipped** the attestation. So:
+
+- **`[warden/capture]` Fuse the three evidence sources.** The process plane = auditd (exec *semantics*) +
+  eBPF `sched_process_fork`/`_exec` (complete *lineage* — closes the pty/host-root fork gap) + cgroups
+  (*membership/scope* key). Add the eBPF + cgroup inputs **alongside** auditd — complementary inputs to one
+  stream, not a replacement/fallback (de-risked: eBPF measured 9/11 + cgroup the rest vs auditd-execve's
+  0/11). **Done when:** the pty-spawned and host-root-injected cases are captured (0/11 → 11/11).
+- **`[agentwatch/groundtruth]` eBPF adapter + cgroup on the event model.** A third `groundtruth/` parser
+  (beside `audit_log.py`/`journald.py`) producing `GroundTruthEvent`, and a `cgroup` field on the model.
+  **Done when:** the fused stream carries lineage + cgroup for the previously-blind execs.
+- **`[agentwatch/runtime_scope]` cgroup-keyed scoping.** Consume **cgroup membership** as the scope key;
+  the ancestry walk becomes a cross-check, not the sole basis. **Done when:** an injected exec is scoped by
+  cgroup (in/out of session) rather than left `unevaluable` for lack of walkable ancestry.
+- **`[both/contract]` The evidence-model contract is the seam** — `GroundTruthEvent` fused from the three
+  sources, with a contract test (below). The one place both repos must land together.
+- **`[both/canon]` Wire canon — the skipped attestation stage.** Residual evidence-incompleteness must
+  flow through as a formal `fidelity_attestation` (`cause=missing-telemetry`, a guarantee tier), *not*
+  README prose. `report.py` already calls `canon_emit.fork_gap_attestation()`, but canon isn't importable
+  in the shipping path so it never fires. **Done when:** a run with a residual gap emits a fidelity tier,
+  not silence. (Also unblocks the publish-sequencing dependency: agentwatch's docs reference canon tiers.)
+- **`[both/test]` Fork-gap acceptance test — on the contract.** A pty-spawned / host-root-injected exec
+  must receive a *verdict* (or, where a gap genuinely remains, a *fidelity attestation*) — never silent
+  `unevaluable`. The guard whose absence let the gap ship. **Done when:** the test exists and fails on
+  regression.
 
 ## Phase 3 — granularity (the recorded open problem)
 
