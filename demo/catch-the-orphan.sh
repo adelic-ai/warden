@@ -38,9 +38,13 @@ EXEC=(sudo incus exec "$INSTANCE" --project "$PROJECT" --)
 say() { printf '\n\033[1m>>> %s\033[0m\n' "$*"; }
 
 say "1/4  Cage a real agent (key-free, egress-locked, audited)"
-# Idempotent: stands the home up if it isn't already, and stamps a fresh session boundary so the
-# reconcile below scopes to THIS run. Does not drop you into a shell.
+# Idempotent: stands the home up if it isn't already. Does not drop you into a shell.
 run_warden dev --name "$INSTANCE" --llm "$LLM" --project "$PROJECT" --no-shell
+
+# Window start for the reconcile. `--no-shell` doesn't stamp a session boundary (only interactive entry
+# does), so we scope report --live explicitly to everything from HERE on — the agent's turn + the
+# foothold — excluding this home's prior history and the one-time furnishing.
+DEMO_START="$(date +%s)"
 
 say "2/4  The agent does a little benign, tool-authorized work"
 # A real, non-interactive agent turn. Its Bash tool calls become 'authorized' execs — the honest
@@ -60,8 +64,8 @@ say "3/4  SIMULATE A POST-COMPROMISE FOOTHOLD — a command the agent never made
 "${EXEC[@]}" sh -lc 'id; hostname; head -1 /etc/os-release; echo "[foothold] a real attacker would not stop here"'
 
 say "4/4  Reconcile: the unforgeable plane vs the agent's own self-report"
-# report --live scopes to this session; the foothold falls in the accountable work window.
-run_warden report --live --instance "$INSTANCE" --llm "$LLM" --project "$PROJECT" || true
+# Scoped to this demo's window (see DEMO_START); the foothold falls in the accountable work phase.
+run_warden report --live --instance "$INSTANCE" --llm "$LLM" --project "$PROJECT" --since "$DEMO_START" || true
 
 cat <<'EOF'
 
