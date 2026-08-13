@@ -13,8 +13,11 @@
 # such a foothold's activity looks like to the audit plane: an exec the agent never made, absent from
 # its self-report. We simulate the attacker (you always do, in a demo); warden's detection is real.
 #
-# The mechanism is validated: see DEV-LIVE-VALIDATION.md, where an operator's own `incus exec` commands
-# showed up as CONFIRMED for precisely this reason (operator and agent share one uid at the plane).
+# ⚠ UNDER RE-VERIFICATION (2026-08-13): the premise below — that an injected `incus exec` reconciles as
+# CONFIRMED — is NOT yet confirmed. Reading agentwatch/reconciler/runtime_scope.py suggests an external
+# exec is OUT of the agent's session subtree (ancestry doesn't reach the runtime pid) and would read as
+# `not_evaluated`, not CONFIRMED. The preregistered experiment at experiments/reconciler-calibration/
+# settles it. Do NOT present this demo as accurate until that run confirms the verdict.
 #
 # Requires: a working warden substrate (Incus 7.x, kernel-owned) and agentwatch on the import path.
 # Your agent (claude) should be logged in inside the home once, so it can do the benign baseline task.

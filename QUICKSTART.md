@@ -52,6 +52,14 @@ anywhere. Re-running the same command drops you back into the *same* home; your 
 
 ## The demonstration: warden catches what the agent's logs never admit
 
+> **⚠ Under re-verification (2026-08-13).** The specific claim below — that an injected foothold
+> reconciles as **CONFIRMED** — is being checked by a preregistered experiment
+> (`experiments/reconciler-calibration/`). The reconciler scopes by process *ancestry*, so an externally
+> injected exec may instead surface as **`not_evaluated`** (an honestly-disclosed blind spot) rather than
+> CONFIRMED. The *value* — warden surfacing activity the agent's self-report can't account for — holds
+> either way; the exact verdict word is what's under test. This section will be corrected to match the
+> run.
+
 This is the part that matters. Suppose an attacker gets a foothold in the agent's container — a
 prompt-injected reverse shell, a malicious npm dependency, a compromised MCP server, any real vector.
 They run commands. **The agent never made those tool calls, so its transcript has no record of them.**

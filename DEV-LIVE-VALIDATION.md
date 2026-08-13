@@ -46,6 +46,14 @@ into evidence rather than a claim: remove the operator, and the reconciler flags
 
 ### 1. Operator and agent share one uid — operator activity reads as CONFIRMED
 
+> **⚠ UNDER RE-VERIFICATION (2026-08-13).** This finding was an *inference from correlation*, not a
+> controlled test. Reading `agentwatch/reconciler/runtime_scope.py` afterward shows `in_scope` is
+> ancestry-based (an exec is the agent's only if its process ancestry reaches the runtime pid), and
+> CONFIRMED is assigned *only to in-scope execs*. An external `incus exec` is parented by the incus
+> agent, not the runtime — so by the code it should be `not_evaluated`, **not** CONFIRMED. The
+> preregistered experiment at `experiments/reconciler-calibration/` will settle it; treat this claim as
+> provisional until then. Do not cite it.
+
 An operator `incus exec` into the container runs as container-root, which the idmap maps to the **same
 host uid the agent runs under**. The audit plane sees one uid; the reconciler finds execs the agent's
 transcript does not explain and — correctly — calls them CONFIRMED. In the contaminated run the 6
