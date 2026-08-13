@@ -70,16 +70,27 @@ so a host-root fork into the container is a permanent blind spot. Ranked honestl
   at all** (scoping is uid-keyed).
 - **(c) non-root agent uid (ROADMAP step 1b) — helps this case.** If the agent is `dev` and injections
   run as `root`, uid separates them, sidestepping the ancestry walk for operator/host-root injection.
-- **(d) eBPF (cgroup-labeled) — the complete instrument, and NOT built.** An eBPF program on the
-  `sched_process_fork`/`sched_process_exec` tracepoints captures *every* process creation — including
-  incusd's host-root fork into the container — with the cgroup attached, independent of uid-filtering.
-  This is what `cagetheagent/DESIGN.md` gestures at ("auditd/eBPF") but has **no implementation**. It is
-  the real answer to "complete resolution," and it is a genuine capture-layer build, not a config change.
+- **(d) eBPF (cgroup-labeled) — the complete instrument, ALREADY VALIDATED, NOT integrated into warden.**
+  An eBPF program on `sched_process_fork`/`sched_process_exec` captures *every* process creation —
+  including incusd's host-root fork into the container — with cgroup attached, independent of
+  uid-filtering. This is **not speculative**: the CageTheAgent testbed already prototyped and *measured*
+  it — `auditd execve` alone orphaned **0/11** build actions (agent spawns via pty: forkpty→setsid),
+  **eBPF `sched_process_fork` got 9/11 and cgroup covered the rest** (memory `warden-substrate-kernel-
+  ownership`; `cagetheagent/DESIGN.md`). The design invariant is *"host-side process-lifecycle telemetry
+  keyed by cgroup."* **warden's shipping capture layer (`auditd.py`) diverged from this** — it ships
+  `execve`+`clone`, uid-scoped, i.e. the exact approach the prior work measured as insufficient.
 
-**The honest synthesis with warden's ethos:** completeness is the *goal* (pursue it via the eBPF/cgroup
-capture upgrade); disclosure of whatever gap remains is the *invariant* (never present an unresolved
-event as resolved). Today warden sits at "disclose honestly" for host-root injection; getting to
-"resolve completely" is the (d) build.
+**The real finding, then:** this is not new research and not vaporware — it is an **integration gap**.
+warden ships a capture approach its own validation already found blind to the fork gap; the eBPF/cgroup
+solution is designed and measured but never ported into warden. "Complete event resolution" =
+**integrate the validated eBPF/cgroup capture into warden**, plus the non-root-agent uid split (c) for
+the operator/injection distinction.
+
+**The honest synthesis with warden's ethos:** completeness is the *goal* (integrate the already-validated
+eBPF/cgroup capture); disclosure of whatever gap remains is the *invariant* (never present an unresolved
+event as resolved). Today warden's *shipping* code sits at "auditd, blind to host-root forks, and it
+should disclose that, not hide it"; getting to "resolve completely" is porting (d) — a build that is
+de-risked because the approach is already measured.
 
 ## Next actions
 
