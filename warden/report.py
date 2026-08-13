@@ -75,6 +75,22 @@ STATE_NAME = "agentwatch_state.json"
 
 COLLECTOR = Path(__file__).resolve().parent.parent / "scripts" / "warden-collect-audit.sh"
 
+#: Default eBPF live-capture window. Unlike the auditd log (persistent, reconciled after the fact),
+#: eBPF's ring buffer is live-only — the probe must run *while* the agent acts — so a window is
+#: intrinsic to the capture, not an afterthought. See `Reporter.reconcile_ebpf_live`.
+DEFAULT_EBPF_CAPTURE_SECONDS = 30
+
+
+@dataclass
+class EbpfLiveResult:
+    """What a decision-B live eBPF reconcile produced. Deliberately small: run_once owns the durable
+    artifacts (findings.jsonl etc.); this is the at-a-glance count the CLI renders."""
+
+    findings_written: int
+    ground_truth_execs: int
+    capture_skipped: int
+    capture_window_s: int
+
 #: The three windows an agent-uid exec can fall in, split by the run manifest's clock.
 #:
 #: `after_run` exists because two of the things that land there are warden's own: the capture-proof
@@ -644,6 +660,76 @@ class Reporter:
             consistency_note=note,
             fork_gap_attestation=attestation,
             honesty=_honesty_block(),
+        )
+
+    # -- decision B: live eBPF reconcile ---------------------------------------
+    def reconcile_ebpf_live(
+        self,
+        out_dir: Path,
+        *,
+        agent_uid: int,
+        duration_s: int = DEFAULT_EBPF_CAPTURE_SECONDS,
+        transcript_path: Optional[Path] = None,
+        runtime: Optional[str] = None,
+        host: Optional[str] = None,
+        _capture=None,
+    ) -> EbpfLiveResult:
+        """Decision B, live: agentwatch loads its OWN eBPF probe on the vantage and reads its own
+        buffer; warden only supplies the privilege (`privilege.elevation_prefix()`) and invokes. The
+        captured events reconcile through the SAME `run_once` the auditd path uses — no second
+        reconciler, no lowered honesty bar (report.py's principle).
+
+        This is a distinct entry point from `report()`, not a flag on it, because the capture models
+        genuinely differ: auditd is a persistent log reconciled after the fact, while eBPF's ring
+        buffer is live-only — the probe must run CONCURRENTLY with agent activity, so this captures a
+        `duration_s` window rather than collecting a log that already exists. That live shape is also
+        exactly the injection scenario the fork-gap fix must close (a host-root `incus exec` into the
+        cage while the probe watches).
+
+        `agent_uid` + `transcript_path` are the container identity and self-report location warden
+        hands over (REFACTOR.md's B boundary). The session cgroup self-seeds from the runtime's own
+        exec in the capture stream (agentwatch runtime_scope), so no cgroup argument is needed for the
+        basic path; an authoritative cgroup handover is the P2 enhancement.
+
+        `_capture` is a seam for tests — it defaults to the real `ebpf_capture.run_capture`, which
+        spawns bpftrace and needs a kernel the operator owns (validated on gembox, not in unit tests).
+        """
+        _import_agentwatch()
+        from agentwatch import runtimes
+        from agentwatch.events import EXEC
+        from agentwatch.groundtruth import ebpf_capture
+        from agentwatch.run import Config, run_once
+        from warden.privilege import elevation_prefix
+
+        out_dir = Path(out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        host = host or socket.gethostname()
+        runtime = runtime or runtimes.CLAUDE.name  # the interactive dev-home default
+        capture = _capture if _capture is not None else ebpf_capture.run_capture
+
+        events, stats = capture(duration_s=duration_s, elevation_prefix=elevation_prefix())
+        config = Config(
+            agent_uid=agent_uid,
+            transcript_paths=[transcript_path] if transcript_path else [],
+            ground_truth_events=events,
+            findings_path=out_dir / FINDINGS_NAME,
+            state_path=out_dir / STATE_NAME,
+            verdicts_path=out_dir / VERDICTS_NAME,
+            runtime=runtime,
+            host=host,
+            # Same as report(): the self-mod detector watches the monitor's host paths, out of scope
+            # for a container reconcile and it would make the count depend on the operator's own FS.
+            self_mod_watched_paths=(),
+        )
+        new_findings = run_once(config)
+        # Same "clean != never-ran" rule as report(): an empty findings file says "looked, found
+        # nothing"; an absent one says nothing at all. FindingsStore only creates on append.
+        (out_dir / FINDINGS_NAME).touch()
+        return EbpfLiveResult(
+            findings_written=len(new_findings),
+            ground_truth_execs=sum(1 for e in events if e.kind == EXEC),
+            capture_skipped=stats.lines_skipped,
+            capture_window_s=duration_s,
         )
 
     # -- small helpers ---------------------------------------------------------
