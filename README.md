@@ -98,7 +98,12 @@ python3 -m warden.cli down <instance>
 It separates **authorized** / **CONFIRMED** / **NONE** / **GAP** and segments provisioning from
 work — deliberately with no combined "deviation" number, because a run that only hits coverage
 boundaries is showing you blind spots, not misbehaviour, and one number cannot say both. It is not
-calibrated, offers no thresholds or triggers, and reports the fork gap rather than catching it.
+calibrated, offers no thresholds or triggers, and reports the fork gap rather than catching it. The
+shipping capture plane (auditd-execve, uid-scoped) is **measurably** fork-gap-blind — execve-ancestry
+orphaned 0/11 actions on a real agent build (pty-spawned work); eBPF recovered 9/11 + cgroup the rest.
+The validated fix — eBPF process-lifecycle capture keyed by cgroup — is **not yet integrated**
+(`CAPTURE-CONSTRAINT.md`), so host-root-injected and pty-spawned execs are *disclosed as unevaluable*,
+never presented as caught.
 
 ## Status — measured, and honestly bounded
 

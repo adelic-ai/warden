@@ -601,3 +601,29 @@ machine — was previously invisible to it.
 
 The key-prefix filter is unchanged and tested: `prune` only ever considers `warden-*` keys, so a
 co-located capsule's rule is never a candidate.
+
+### The capture plane ships fork-gap-blind, and that is now recorded, not silent (2026-08-13)
+
+The ground-truth plane is `auditd` `execve`+`clone`, uid-scoped (`auditd.py`). A separate, un-versioned
+BlackHat analysis (now moved in as `CAPTURE-CONSTRAINT.md`) had *already measured* that `auditd execve`
+ancestry orphans **0/11** agent build actions — the agent spawns work through a pty (`forkpty→setsid`,
+native fork in `node-pty`) — while eBPF `sched_process_fork` recovered **9/11** and cgroup the rest, and
+defined the invariant as *host-side process-lifecycle telemetry keyed by cgroup*. The implementation went
+the other way and **nothing bridged the two**: the finding was in a loose file outside the repo, absent
+from this log, and unguarded by a test — so it shipped blind.
+
+The `experiments/reconciler-calibration/` run re-derived the gap from scratch: an external `incus exec`
+reconciles as `unevaluable` (not CONFIRMED), because `incusd`'s injecting fork happens at host root (uid
+0), outside the uid-scoped rule; the `clone`-bridge covers only in-container forks. This is an **evasion
+vector** (double-fork / cross-namespace injection is unattributable by construction), and it is the same
+fork gap `DEMO-SPEC.md §7` already forbids presenting as *caught*.
+
+**Decision:** (1) auditd stays the shipping plane *for now* — it is portable (the `clone`-not-`fork`
+arch-portability reasoning in `auditd.py` is why) and adequate for the shell-out case `§7` scopes recall
+to; (2) the fork-gap blindness is **disclosed** in README/QUICKSTART, never hidden; (3) **eBPF
+(cgroup-labeled) process-lifecycle capture is the validated target and a tracked ROADMAP obligation** —
+integration, not research, since it is already measured; (4) it must land **with a test** pinning a
+fork-gap verdict, because "a validated finding with no in-repo test" is exactly the failure that let this
+ship. The `matched = matched_pid is not None` UNEVALUABLE accounting (elsewhere in this log) is the
+report-side companion; note also that `report.py`'s `not_evaluated_by_comm` currently omits unevaluable
+execs (19/37 invisible in the calibration run) — under-disclosure to fix alongside.

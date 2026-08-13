@@ -106,6 +106,13 @@ than useless. From a real validated run (`DEV-LIVE-VALIDATION.md`):
 - A shell that forks without exec breaks the ancestry walk (the **fork gap**) — those execs are reported
   as **not-evaluated**, never counted as clean. "No CONFIRMED here" is absence of evidence, not evidence
   of absence, and warden says so.
+- **The shipping capture plane (auditd-execve) is fork-gap-blind, by measurement.** On a real agent build,
+  execve-ancestry orphaned **0 of 11** actions (the agent spawns work through a pty; eBPF recovered 9/11 +
+  cgroup the rest). And a command injected via a host-root fork (`incus exec`, cross-namespace injection)
+  lands **unevaluable**, not caught — an evasion vector warden *discloses*, doesn't close. The validated
+  fix — eBPF process-lifecycle capture keyed by cgroup — is **not yet integrated** (see
+  `CAPTURE-CONSTRAINT.md`). Until it is, warden reports these as blind spots; it does not pretend to catch
+  them.
 - It is **not calibrated** — this is a working mechanism, not an FP/FN rate. No corpus, no thresholds,
   no confident numbers it can't back.
 - One structural caveat the demo itself exposes: at the audit plane, **operator and agent share one
