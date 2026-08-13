@@ -160,3 +160,39 @@ is what would close this, and choosing that workload is a judgment call, not a m
 * `/etc/audit/rules.d` persistence is skipped under a scoped sudo grant, so a warden audit rule does
   not survive a reboot. `warden up` says so on stderr. If reboot-survival is wanted, that needs a
   wider grant or a root-run `up`, and D28 explains why neither was done by default.
+
+---
+
+## 2026-08-13 — The eBPF capture path (decision B) needs a bpftrace privilege grant on the vantage
+
+**What:** `warden report --live --ebpf` (decision B — the fork-gap-robust plane, REFACTOR.md /
+CANONICAL-SHAPE.md) captures process lifecycle with a bpftrace probe that agentwatch loads and reads
+itself (`agentwatch/groundtruth/ebpf_capture.run_capture`, invoked by `Reporter.reconcile_ebpf_live`).
+Loading an eBPF program needs `CAP_BPF`/root on the kernel the probe runs on — the VM/vantage above
+the container. warden supplies the privilege via the existing `privilege.elevation_prefix()`
+(`sudo -n`), so the grant on that host must include bpftrace.
+
+**Why it needs a human:** granting bpftrace is granting a **root-equivalent** capability — bpftrace can
+read/write kernel memory and run arbitrary eBPF, so a bare `NOPASSWD: /usr/bin/bpftrace` is effectively
+`NOPASSWD: root`. Editing sudoers is itself privileged. Neither can (or should) be done by warden. Two
+hard rules learned on gembox:
+1. **Do not broaden the restricted service account.** gembox's `gembox` account is deliberately
+   scoped-sudo (incus/auditctl/ausearch/nft only); adding bpftrace to it would hand that account
+   root-equivalence and defeat the isolation it exists to provide. Provision the capability to a
+   dedicated privileged component, or scope it (below) — never widen the account the caged agent runs
+   under.
+2. **Scope the grant to a root-owned capture script.** The production shape is
+   `NOPASSWD: /usr/bin/bpftrace /opt/agentwatch/capture.bt`, where `capture.bt` is **root-owned and not
+   writable by the grantee** (otherwise the grantee edits the script and the scope is meaningless).
+
+**What was done meanwhile:** built and unit-tested the whole path with bpftrace mocked — the loader/reader
+and the `run_once` fusion seam (agentwatch, `feat/ebpf-capture-loader`), and warden's invocation
+(`reconcile_ebpf_live` + the `--ebpf` CLI, this branch). The bpftrace **program** is validated on gembox
+(v0.14.0 / kernel 6.5.4): struct-free ppid via a fork-populated map, cgroup + filename captured. **Did
+not** self-grant privilege or route around the sudoers boundary.
+
+**Remaining before this is validated end to end** (P5, needs the grant on gembox): with the caged agent
+running, `sudo bpftrace` the probe on the VM kernel while a host-root `incus exec` injects an exec into
+the container, and confirm `warden report --live --ebpf` reconciles it as **CONFIRMED** (not
+`UNEVALUABLE`) via the cgroup rescue. That closes the fork gap the auditd plane (item #1 above) cannot,
+and is the one piece the unit tests structurally cannot cover.

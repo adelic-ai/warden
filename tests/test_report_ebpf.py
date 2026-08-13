@@ -57,6 +57,17 @@ def test_live_ebpf_surfaces_forkgap_injection_via_run_once(tmp_path):
     assert seen["elevation_prefix"] is not None
 
 
+def test_cli_ebpf_requires_live(capsys):
+    # --ebpf is live-only (ephemeral ring buffer); using it after-the-fact must refuse, not silently
+    # fall back to auditd. Pure argument handling — no incus, no agentwatch needed.
+    import warden.cli as cli
+
+    args = cli.build_parser().parse_args(["report", "--llm", "claude", "--ebpf"])
+    rc = cli._report(args)
+    assert rc == 1
+    assert "live-only" in capsys.readouterr().err
+
+
 @requires_agentwatch
 def test_clean_window_writes_empty_findings_not_absent(tmp_path):
     from agentwatch.events import ParseStats

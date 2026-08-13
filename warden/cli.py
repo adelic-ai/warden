@@ -25,10 +25,13 @@ from warden.incus import IncusCommandError, IncusNotFoundError, RealIncusClient
 from warden.proxy import RealProxyAllowlistController, run_forever
 from warden.recover import SubstrateUnrecovered, diagnose_and_recover, run_with_recovery
 from warden.export import Exporter
+from warden.idmap import derive_idmap
 from warden.report import (
+    DEFAULT_EBPF_CAPTURE_SECONDS,
     PROVISIONED_AT_KEY,
     REPORT_NAME,
     SESSION_STARTED_KEY,
+    TRANSCRIPT_NAME,
     ReportError,
     Reporter,
     live_manifest,
@@ -111,6 +114,15 @@ def build_parser() -> argparse.ArgumentParser:
                         help="(implied — report requires the ground-truth plane)")
     report.add_argument("--out", type=Path, default=DEFAULT_RUNS_DIR, help="host artifact root")
     report.add_argument("--host", default=None, help="hostname recorded in verdicts; defaults to this host")
+    report.add_argument(
+        "--ebpf", action="store_true",
+        help="capture with the eBPF probe (fork-gap-robust, decision B) instead of the auditd log. "
+             "Live-only (the ring buffer is ephemeral), so it requires --live and captures a window.",
+    )
+    report.add_argument(
+        "--capture-seconds", type=int, default=DEFAULT_EBPF_CAPTURE_SECONDS, dest="capture_seconds",
+        help=f"eBPF live-capture window in seconds (default {DEFAULT_EBPF_CAPTURE_SECONDS}; --ebpf only)",
+    )
 
     export = sub.add_parser("export", help="tar everything out: copy all, nothing summarised")
     export.add_argument("dest", type=Path, help="directory to write the tarball into")
@@ -352,6 +364,14 @@ def _resolve_live_since(client, cfg, since_arg: Optional[str]) -> float:
 
 def _report(args: argparse.Namespace) -> int:
     live = getattr(args, "live", False)
+    use_ebpf = getattr(args, "ebpf", False)
+    if use_ebpf and not live:
+        print(
+            "error: --ebpf is live-only (its ring buffer is ephemeral, unlike the auditd log). "
+            "Use `warden report --live --ebpf`.",
+            file=sys.stderr,
+        )
+        return 1
     flavor = "dev" if live else args.flavor
     instance = args.instance or f"warden-{flavor}"
     cfg = build_config(
@@ -365,6 +385,28 @@ def _report(args: argparse.Namespace) -> int:
         event_source_factory=lambda inst: RealEventSource(inst),
     )
     try:
+        if use_ebpf:
+            # Decision B: agentwatch loads its own probe on the vantage (warden elevates + invokes).
+            # A synthesized live manifest just supplies the transcript location + runtime; the eBPF
+            # capture window, not a --since lookback, defines what the plane covers.
+            since = _resolve_live_since(reporter.client, cfg, args.since)
+            manifest = live_manifest(reporter.client, cfg, since=since, out_dir=out)
+            agent_uid = derive_idmap(reporter.client, cfg.instance, project=cfg.project).uid.host_start
+            transcript_path = reporter.pull_transcript(cfg, manifest, out / TRANSCRIPT_NAME)
+            result = reporter.reconcile_ebpf_live(
+                out,
+                agent_uid=agent_uid,
+                duration_s=args.capture_seconds,
+                transcript_path=transcript_path,
+                runtime=manifest.agentwatch_runtime,
+                host=args.host,
+            )
+            print(
+                f"eBPF live reconcile ({result.capture_window_s}s window): "
+                f"{result.ground_truth_execs} agent execs captured, "
+                f"{result.findings_written} finding(s) written to {out / 'findings.jsonl'}"
+            )
+            return 0
         if live:
             since = _resolve_live_since(reporter.client, cfg, args.since)
             manifest = live_manifest(reporter.client, cfg, since=since, out_dir=out)
