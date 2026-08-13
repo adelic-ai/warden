@@ -37,30 +37,50 @@ Everything below is *organizational*; the contract-as-tested-seam is the part th
   agentwatch the container's **identity** (cgroup/uid) and the **transcript location**. It does this
   *gracefully* (the wedge/version/profile handling). It is swappable: any environment that satisfies the
   contract's environment half can replace it (a cloud VM, a hand-rolled host).
-- **agentwatch = the complete monitor.** Owns **capture → fuse → reconcile**: the eBPF/auditd/cgroup
-  *capture library*, the fused `GroundTruthEvent` evidence model, and the reconciler (scope + verdicts).
-  Contract-bound, not run-anywhere. This is the analytical core and the center of gravity of the work.
+- **agentwatch = the monitor.** Owns the **fused `GroundTruthEvent` evidence model** (parsing + fusion)
+  and the **reconciler** (scope + verdicts) — the analytical core and center of gravity — *unconditionally*.
+  Whether it *also* owns the privileged **capture mechanism** (the probe loader) is the open decision
+  below; parsing/fusion/reconcile are agentwatch's either way. Contract-bound, not run-anywhere.
 - **canon = fidelity + qualification.** Attests the **evidence's fidelity** (`fidelity_attestation`,
   `cause=missing-telemetry`, a tier — the evidence-model output stage) and qualifies **verdicts**
   (guarantee tiers). Wired into the reconcile/report path; currently unimportable, so nothing fires.
 
-## The one open decision — where the eBPF *probe* lives
+## The one open decision — where the capture MECHANISM lives (A vs B)
 
-The reconciler side is agentwatch either way. The capture *mechanism* (the privileged probe/rule loader)
-is the open call:
+The reconciler + the fusion/parsing are agentwatch's either way. The open call is the **privileged capture
+mechanism** — the thing that loads the probe / installs the rule and emits the event stream:
 
-- **A. warden loads it** (part of standing up the cage) → capture-config stays with substrate setup;
-  agentwatch parses. Keeps warden's all-in-one setup cohesive; **re-creates the seam that just failed**
-  (warden emits, agentwatch consumes, they can diverge — mitigated only by the contract test).
-- **B. agentwatch owns it** (the *complete monitor* captures its own telemetry; warden invokes it during
-  setup and provides the vantage). **Eliminates the divergence seam** (one repo owns capture→reconcile),
-  matches "a monitor that slots into any vantage," at the cost of a privileged component in agentwatch
-  (fine — it runs on the vantage, above the agent's reach).
+- **A. warden owns capture** — emits a shared event stream; agentwatch consumes it, unprivileged.
+- **B. agentwatch owns capture** — the monitor loads its own probe + reads its own buffer; warden provides
+  the vantage + container identity and invokes it at setup.
 
-**Recommendation: B**, gated on the contract test existing first. B is the only option that structurally
-prevents the divergence; A only papers over it with a test. The privilege concern is real but bounded —
-the probe loader is a small root component on the vantage, exactly like warden's existing privileged
-collector, and it never runs where the agent can reach it. *Settle this before Phase 2 code starts.*
+**First, the mechanics, because they tilt the setup effort.** eBPF is *not* configured like `auditctl`:
+auditd is a *declarative rule* feeding a **shared system log** (multi-consumer, free), whereas eBPF is a
+*loaded program* writing a **private ring buffer the loader reads** — loader and reader are naturally one
+process. So **B is the mechanically natural shape for eBPF** (loader = reader = agentwatch). A is still
+possible, but warden must run a **privileged eBPF collector** that re-emits events to a shared stream —
+more machinery, though the *same pattern* as warden's existing privileged auditd collector.
+
+**The safety axis — two distinct strengths; do not conflate them:**
+- **B kills divergence *structurally*.** Capture and reconcile are one codebase, so there is *no seam* to
+  diverge — the failure mode is **impossible by construction**.
+- **A kills divergence *detectively*.** The seam exists (warden emits ↔ agentwatch consumes); the contract
+  completeness-test **catches** divergence — the failure mode is *possible but detected*. Structural
+  (impossible) is stronger than detective (caught-if-the-test-holds-and-nobody-disables-it); that is B's
+  real edge, and a test in A does not fully replace it.
+
+**The privilege axis — here A wins:**
+- **A keeps warden's DESIGN §4 privilege split.** All root stays in warden's capture/collector;
+  **agentwatch stays fully unprivileged** — a pure analysis component that can even reconcile an *exported*
+  log off-host, after the fact, and be consumed by other tools (a SIEM reading the same stream).
+- **B spreads privilege.** agentwatch grows a root probe-loader (bounded — it runs on the vantage, above
+  the agent's reach, like warden's collector) and loses the pure-unprivileged / offline-analysis property.
+
+**The tradeoff, flat: structural safety (B) vs. privilege discipline + analysis purity (A).** Both are
+coherent architectures; there is deliberately **no lean here**. The **contract completeness-test is
+required either way** — the safeguard in A, a completeness check in B. Settle the A/B call **before Phase 2
+touches capture code**, and land the **contract test first regardless** — it is what makes A *safe* and B
+*verified*.
 
 ## Migration = the remediation phases, boundary-attributed
 
@@ -84,6 +104,7 @@ canon is the attestation layer; the moat is the *invariant* they jointly hold. S
 
 ## The single sentence
 
-**Make the evidence-model contract a tested seam; give agentwatch the whole monitor (capture→reconcile);
-leave warden the cage and the vantage it hands over; wire canon for fidelity — and decide B-vs-A before
-Phase 2 touches capture code.**
+**Make the evidence-model contract a tested seam; agentwatch owns fusion + reconcile (and *maybe* capture,
+per the A/B call); warden owns the cage and the vantage it hands over; wire canon for fidelity — land the
+contract test first, then decide A-vs-B (structural safety vs. privilege purity) before Phase 2 touches
+capture code.**
