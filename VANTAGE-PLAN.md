@@ -104,14 +104,22 @@ phase 1 does.
 `incus`/`auditctl`/`ausearch`/`nft`, deliberately *not* `bpftrace`. Phase 1 assumes that grant exists;
 it is not something this plan sets up or re-derives.
 
-1. **Persistent vantage-VM lifecycle — landed.** `warden/vantage.py`, `ensure_vantage_vm()`. A
-   create-if-absent counterpart to `build_vm.py`'s create-and-destroy-per-build primitive — same
-   VM-instance shape (`images:debian/12` today, `<golden-alias>` once phase 2 exists), but the
-   vantage VM survives across invocations like the `dev` home it hosts does. `_wait_ready` is the
-   first-boot poll from the failure-handling section below, not `recover.py`. 4 tests against
-   `FakeIncusClient` (`tests/test_vantage.py`); not yet run against pop-os — the fast-path/no-op
-   behavior, VM-vs-container instance type, and the wait-ready timeout are proven against the fake,
-   real cold-boot timing is not.
+1. **Persistent vantage-VM lifecycle — landed, validated on pop-os.** `warden/vantage.py`,
+   `ensure_vantage_vm()`. A create-if-absent counterpart to `build_vm.py`'s create-and-destroy-per-
+   build primitive — same VM-instance shape (`images:debian/12` today, `<golden-alias>` once phase 2
+   exists), but the vantage VM survives across invocations like the `dev` home it hosts does.
+   `_wait_ready` is the first-boot poll from the failure-handling section below, not `recover.py`.
+   4 tests against `FakeIncusClient` (`tests/test_vantage.py`). Real-host run: first call created a
+   genuine `VIRTUAL-MACHINE` instance in 47.9s (within the 120s bound), second call was a 0.1s
+   no-op. **One real bug the fake couldn't catch:** the module originally defaulted to the `default`
+   project, matching Shape A's manual command — but `ensure_build_vm_substrate` restricts a
+   project's allowed networks, and `default` is shared with unrelated tenants (`cta-dev-vm`). Incus
+   refused the restriction, but the convergence loop had already set 2–4 keys on `default` before
+   failing on the conflicting one each time, leaving it partially modified twice (reverted by hand
+   both times, verified clean after). Fixed by defaulting to the dedicated `warden` project instead
+   (same one `build_vm.py`'s own builds already use). The underlying atomicity gap —
+   `ensure_build_vm_substrate` has no rollback on a mid-loop failure — is still there; noted, not
+   fixed, since the actual fix here was not triggering the conflict at all.
 2. **The mold.** Run `install-incus-nested.sh` (steps 1–5 above) end to end, unattended (no human
    answering prompts), then `scripts/verify-vantage-vm.py` to confirm warden + agentwatch actually
    import before trusting the image, then `incus stop` + `incus publish` to a local image alias.
