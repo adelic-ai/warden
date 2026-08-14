@@ -160,11 +160,18 @@ it is not something this plan sets up or re-derives.
    boot cost phase 1 always had, not new), confirmed `image='warden-vantage-golden'`, and confirmed
    `incus version` (client + server, both 7.3) and `git` already present with **zero apt calls** —
    the actual point of molding, working as designed. 2 tests against `FakeIncusClient`.
-4. **Code deploy.** Script steps 6–7 — bundle-push-clone warden + agentwatch onto the VM every
-   launch, from whatever's checked out locally (not a pinned branch), then
-   `scripts/verify-vantage-vm.py` post-deploy — this is the phase it actually belongs to, verifying
-   the *fresh* code (the thing that changes every launch, and what D29-class drift would show up in),
-   not the mold.
+4. **Code deploy — landed and validated for real.** `warden/deploy.py`, `deploy_code()`. Bundles the
+   CURRENT HEAD of both repos (not a pinned branch, unlike Shape A's manual build), pushes, clones
+   as `/root/warden` + `/root/agentwatch`, then pushes and runs `scripts/verify-vantage-vm.py` and
+   raises `DeployError` on anything but all-green. **Found and fixed a real bug in the verify script
+   itself while wiring this up:** it added `/root/agentwatch` to `sys.path` but never
+   `/root/warden`, so the "warden importable" check would have failed every single time regardless
+   of correctness — never exercised for real until now, since the script this was recovered from
+   (Shape A's) only ever checked agentwatch. Real-host run on pop-os: `ensure_vantage_vm()` reused
+   the golden alias, then `deploy_code()` completed in 8.5s — `warden@f1b2573` +
+   `agentwatch@12a689d`, and a direct re-run of `verify-vantage-vm.py` confirmed all four checks
+   green, including the one just fixed. 5 tests (real `git bundle` against this repo + the sibling
+   agentwatch checkout, Incus-side wiring against `FakeIncusClient`).
 5. **Remote-drive container creation.** Invoke step 8's `warden dev`-equivalent over `incus exec`
    from the base host. No container-side code changes expected — this already worked as-is.
 6. **File transfer verbs.** `warden push`/`warden pull` (naming TBD) wrapping `incus file push/pull`,
