@@ -86,6 +86,7 @@ def resolve(llm: str, extra_allow: Iterable[str] = ()) -> BuildVmSpec:
 
 def build_vm_profile(
     *,
+    name: str = "warden-build-vm",
     mem: str = "4GiB",
     cpu: str = "2",
     pool: str = STORAGE_POOL,
@@ -108,7 +109,7 @@ def build_vm_profile(
         "limits.memory": mem,
         "limits.cpu": cpu,
     }
-    return ProfileSpec(name="warden-build-vm", config=config, devices=devices)
+    return ProfileSpec(name=name, config=config, devices=devices)
 
 
 class BuildVmError(RuntimeError):
