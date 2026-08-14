@@ -28,7 +28,11 @@ if TYPE_CHECKING:
     from warden.app import WardenApp
 
 DEFAULT_NAME = "warden-vantage"
-DEFAULT_PROJECT = "default"
+#: NOT "default" — that project is shared with unrelated tenants on a real host (e.g. CageTheAgent's
+#: cta-dev-vm on pop-os). ensure_build_vm_substrate restricts a project's allowed networks down to
+#: wardenbr0; doing that against a shared project breaks whatever else lives there and Incus rightly
+#: refuses. Dedicated, same as build_vm.py's own ephemeral builds already use, for the same reason.
+DEFAULT_PROJECT = "warden"
 PROFILE_NAME = "warden-vantage-vm"
 
 #: Bounding the per-attempt liveness exec while waiting for the guest agent.
