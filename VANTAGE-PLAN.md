@@ -152,10 +152,14 @@ it is not something this plan sets up or re-derives.
    **Correction from the original plan, still true:** this does *not* use `scripts/verify-vantage-vm.py`
    — that checks warden/agentwatch imports, which the mold deliberately never has deployed. Stays
    scoped to phase 4.
-3. **Fast launch — unblocked, real golden alias now exists (`warden-vantage-golden`).** Point phase
-   1's `ensure_vantage_vm()` at it instead of `IMAGE` (`images:debian/12`), and verify a launch from
-   it actually skips `apt`/`admin init` entirely and comes up ready in seconds, not minutes — that's
-   the whole point of molding once. Not yet done.
+3. **Fast launch — landed and validated for real.** `ensure_vantage_vm()` checks
+   `image_exists(GOLDEN_ALIAS)` before launch and uses it automatically when present — no
+   caller-supplied flag, every call benefits the moment a mold exists. `VantageInfo` gained an
+   `image` field so callers can see which source was actually used. Real-host run on pop-os: fresh
+   launch from the golden alias in 115.0s (almost entirely VM boot/guest-agent time — the same cold
+   boot cost phase 1 always had, not new), confirmed `image='warden-vantage-golden'`, and confirmed
+   `incus version` (client + server, both 7.3) and `git` already present with **zero apt calls** —
+   the actual point of molding, working as designed. 2 tests against `FakeIncusClient`.
 4. **Code deploy.** Script steps 6–7 — bundle-push-clone warden + agentwatch onto the VM every
    launch, from whatever's checked out locally (not a pinned branch), then
    `scripts/verify-vantage-vm.py` post-deploy — this is the phase it actually belongs to, verifying
