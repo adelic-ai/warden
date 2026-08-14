@@ -13,6 +13,7 @@ from __future__ import annotations
 import sys
 
 sys.path.insert(0, "/root/agentwatch")
+sys.path.insert(0, "/root/warden")
 
 
 def main() -> int:
