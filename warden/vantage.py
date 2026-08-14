@@ -34,6 +34,11 @@ DEFAULT_NAME = "warden-vantage"
 #: refuses. Dedicated, same as build_vm.py's own ephemeral builds already use, for the same reason.
 DEFAULT_PROJECT = "warden"
 PROFILE_NAME = "warden-vantage-vm"
+#: Produced by warden/mold.py phase 2, consumed here by phase 3. Defined here, not in mold.py, so
+#: mold.py imports it from vantage.py rather than the reverse — mold.py already imports
+#: refuse_if_foreign/wait_ready from this module, and a mold.py -> vantage.py -> mold.py import
+#: would be circular.
+GOLDEN_ALIAS = "warden-vantage-golden"
 
 #: Bounding the per-attempt liveness exec while waiting for the guest agent.
 PROBE_TIMEOUT = 15.0
@@ -62,6 +67,10 @@ class VantageInfo:
     #: False when `ensure_vantage_vm` found it already running and did nothing — the common case
     #: after the first call, and the whole point of create-if-absent over create-and-destroy.
     created: bool
+    #: Which image the launch actually came from — GOLDEN_ALIAS if the mold (phase 2) has produced
+    #: one, the stock IMAGE otherwise. None when created=False (nothing was launched this call, so
+    #: there's nothing to report — the existing VM's origin isn't re-derived).
+    image: str | None = None
 
 
 def refuse_if_foreign(client, project: str, name: str) -> None:
@@ -103,8 +112,11 @@ def ensure_vantage_vm(
     container path's, per that method's own docstring) and `build_vm_profile` (the same VM profile
     shape `build_vm.py` already validates) unmodified; the new logic here is the existence check
     plus `refuse_if_foreign` — raises `VantageProjectConflict` rather than converging network
-    policy onto a project that already has other tenants in it. No golden-image launch yet
-    (VANTAGE-PLAN.md phase 2/3) — always the stock image today.
+    policy onto a project that already has other tenants in it.
+
+    Launches from `GOLDEN_ALIAS` (VANTAGE-PLAN.md phase 2's mold output) when one exists in this
+    project, falling back to the stock `IMAGE` otherwise — automatic, not a caller-supplied flag, so
+    every call benefits the moment a mold has been built, with no code change at the call site.
     """
     client = app.client
     if client.instance_exists(name, project):
@@ -113,6 +125,7 @@ def ensure_vantage_vm(
     refuse_if_foreign(client, project, name)
     profile_spec = build_vm_profile(name=PROFILE_NAME, mem=mem, cpu=cpu, pool=app.pool)
     app.ensure_build_vm_substrate(project, profile_spec)
-    client.launch(IMAGE, name, project, profile_spec.name, instance_type="virtual-machine")
+    image = GOLDEN_ALIAS if client.image_exists(GOLDEN_ALIAS, project=project) else IMAGE
+    client.launch(image, name, project, profile_spec.name, instance_type="virtual-machine")
     wait_ready(client, name, project)
-    return VantageInfo(name=name, project=project, created=True)
+    return VantageInfo(name=name, project=project, created=True, image=image)

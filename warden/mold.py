@@ -17,13 +17,12 @@ from typing import TYPE_CHECKING
 
 from warden.build_vm import IMAGE, build_vm_profile, set_proxy_env
 from warden.flavors import DEBIAN_SETUP
-from warden.vantage import DEFAULT_PROJECT, refuse_if_foreign, wait_ready
+from warden.vantage import DEFAULT_PROJECT, GOLDEN_ALIAS, refuse_if_foreign, wait_ready
 
 if TYPE_CHECKING:
     from warden.app import WardenApp
 
 MOLD_INSTANCE_NAME = "warden-vantage-mold-build"
-GOLDEN_ALIAS = "warden-vantage-golden"
 PROFILE_NAME = "warden-vantage-mold-vm"
 INSTALL_SCRIPT_REMOTE_PATH = "/root/install-incus-nested.sh"
 

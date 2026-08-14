@@ -8,9 +8,11 @@ import pytest
 
 from tests.fakes import FakeIncusClient, FakeProxyAllowlistController
 from warden.app import WardenApp
+from warden.build_vm import IMAGE
 from warden.vantage import (
     DEFAULT_NAME,
     DEFAULT_PROJECT,
+    GOLDEN_ALIAS,
     PROFILE_NAME,
     VantageError,
     VantageProjectConflict,
@@ -36,6 +38,23 @@ def test_ensure_vantage_vm_creates_when_absent():
     # substrate (pool/project/network) was ensured along the way, same as the container path
     assert client.project_exists(DEFAULT_PROJECT)
     assert client.network_exists("wardenbr0")
+    # no mold has run - stock image, not the golden alias
+    assert info.image == IMAGE
+
+
+def test_ensure_vantage_vm_uses_golden_alias_when_the_mold_has_produced_one():
+    # Phase 3: once mold.py has published an image, every subsequent launch should use it
+    # automatically - no caller-supplied flag, no code change at the call site.
+    client = FakeIncusClient()
+    app = _app(client)
+    client.project_create(DEFAULT_PROJECT, {})
+    client.images[GOLDEN_ALIAS] = "fake-fingerprint"  # simulates a completed mold
+
+    info = ensure_vantage_vm(app)
+
+    assert info.image == GOLDEN_ALIAS
+    inst = client.instances[(DEFAULT_PROJECT, DEFAULT_NAME)]
+    assert inst.image == GOLDEN_ALIAS
 
 
 def test_ensure_vantage_vm_is_noop_when_already_running():
