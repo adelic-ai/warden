@@ -15,7 +15,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from warden.build_vm import IMAGE, build_vm_profile
+from warden.build_vm import IMAGE, build_vm_profile, set_proxy_env
+from warden.flavors import DEBIAN_SETUP
 from warden.vantage import DEFAULT_PROJECT, refuse_if_foreign, wait_ready
 
 if TYPE_CHECKING:
@@ -30,6 +31,14 @@ INSTALL_SCRIPT_REMOTE_PATH = "/root/install-incus-nested.sh"
 #: Shape A step 3) and git (stable OS tooling phase 4's code deploy needs every launch — baking it
 #: in once here means phase 4 never re-installs it).
 PREREQ_PACKAGES = ("curl", "ca-certificates", "git")
+
+#: The bridge ACL default-drops direct egress (same as every container/VM warden manages) — a VM
+#: reaches nothing until its traffic is routed through warden's own proxy AND that proxy's allowlist
+#: names the hosts it needs. DEBIAN_SETUP is the standing apt-mirror allowlist entry (flavors.py);
+#: pkgs.zabbly.com is install-incus-nested.sh's own repo. Real-host lesson: the first mold attempt
+#: failed with "Network is unreachable" reaching deb.debian.org because this wiring was missing
+#: entirely — not a transient network issue, a real gap.
+MOLD_ALLOWLIST: tuple[str, ...] = (*DEBIAN_SETUP, "pkgs.zabbly.com")
 
 EGRESS_CHECK_TIMEOUT = 60.0
 PREREQ_INSTALL_TIMEOUT = 120.0
@@ -90,11 +99,22 @@ def build_vantage_mold(
         client.launch(IMAGE, instance, project, profile_spec.name, instance_type="virtual-machine")
     wait_ready(client, instance, project)
 
+    # Route the guest through warden's proxy and open it to exactly what the mold needs (apt
+    # mirrors + zabbly) — without this, apt can reach nothing at all, per the bridge ACL's
+    # default-drop. Both required; env alone with an empty allowlist still gets refused at the proxy.
+    set_proxy_env(client, instance, project)
+    if app.proxy_controller is not None:
+        app.proxy_controller.set_allowlist(MOLD_ALLOWLIST)
+
     # -- egress sanity check (Shape A step 2): fail fast if the VM can't reach package mirrors,
-    # rather than let the install script itself produce a confusing mid-script failure.
+    # rather than let the install script itself produce a confusing mid-script failure. `bash -c
+    # 'set -o pipefail; ...'`, not `sh -c '... | tail -3'` — piping through tail masks apt-get's own
+    # exit code with tail's (nearly always 0), which would make this check always "pass" regardless
+    # of whether apt-get actually failed. Caught for real: without pipefail this silently swallowed
+    # the exact "Network is unreachable" failure this check exists to catch.
     _exec_ok(
         client, instance, project,
-        ["sh", "-c", "apt-get update -qq 2>&1 | tail -3"],
+        ["bash", "-c", "set -o pipefail; apt-get update -qq 2>&1 | tail -3"],
         "egress check (apt-get update)", EGRESS_CHECK_TIMEOUT,
     )
 

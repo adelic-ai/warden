@@ -9,7 +9,7 @@ import pytest
 from tests.fakes import FakeIncusClient, FakeProxyAllowlistController
 from warden.app import WardenApp
 from warden.incus import ExecResult
-from warden.mold import GOLDEN_ALIAS, MOLD_INSTANCE_NAME, MoldError, build_vantage_mold
+from warden.mold import GOLDEN_ALIAS, MOLD_ALLOWLIST, MOLD_INSTANCE_NAME, MoldError, build_vantage_mold
 from warden.vantage import DEFAULT_PROJECT, VantageProjectConflict
 
 FAKE_SCRIPT = "#!/bin/bash\necho pretending to install incus\n"
@@ -32,6 +32,21 @@ def test_build_vantage_mold_happy_path_publishes_and_tears_down():
     assert client.instance_exists(MOLD_INSTANCE_NAME, DEFAULT_PROJECT) is False
     # the install script actually got pushed before being run
     assert MOLD_INSTANCE_NAME in [n for n, _ in client.exec_calls]
+
+
+def test_wires_proxy_env_and_allowlist_before_touching_the_network():
+    # Real pop-os lesson: without this, apt gets "Network is unreachable" — not transient, the
+    # bridge ACL default-drops direct egress and the proxy allowlist was simply never set.
+    client = FakeIncusClient()
+    proxy = FakeProxyAllowlistController()
+    app = WardenApp(client, proxy_controller=proxy)
+
+    build_vantage_mold(app, FAKE_SCRIPT)
+
+    assert "deb.debian.org" in MOLD_ALLOWLIST
+    assert "pkgs.zabbly.com" in MOLD_ALLOWLIST
+    # set before any apt call, not after - a late-set allowlist wouldn't have caught the real bug
+    assert proxy.history[0] == MOLD_ALLOWLIST
 
 
 def test_egress_check_failure_raises_mold_error_and_leaves_instance_for_debugging():

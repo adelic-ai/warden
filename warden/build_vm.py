@@ -112,6 +112,19 @@ def build_vm_profile(
     return ProfileSpec(name=name, config=config, devices=devices)
 
 
+def set_proxy_env(client, instance: str, project: str) -> None:
+    """Route the guest's HTTP(S) traffic through warden's own CONNECT-allowlist proxy — the bridge
+    ACL default-drops direct egress, so without this a VM can reach nothing at all, allowlisted or
+    not. Shared by `BuildVmRunner` and `mold.py`; both need a VM that can install OS packages
+    without being able to reach the open internet."""
+    url = f"http://{BRIDGE_GATEWAY}:{PROXY_PORT}"
+    for key in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
+        client.config_set(instance, f"environment.{key}", url, project=project)
+    client.config_set(
+        instance, "environment.no_proxy", f"127.0.0.1,localhost,{BRIDGE_GATEWAY}", project=project
+    )
+
+
 class BuildVmError(RuntimeError):
     """A step of `submit_build` failed outside the build script itself — launch, staging, teardown.
 
@@ -195,12 +208,7 @@ class BuildVmRunner:
         raise BuildVmError(f"{instance}: not ready within {self.WAIT_READY_TIMEOUT}s {last}")
 
     def _set_proxy_env(self, instance: str, project: str) -> None:
-        url = f"http://{BRIDGE_GATEWAY}:{PROXY_PORT}"
-        for key in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
-            self.client.config_set(instance, f"environment.{key}", url, project=project)
-        self.client.config_set(
-            instance, "environment.no_proxy", f"127.0.0.1,localhost,{BRIDGE_GATEWAY}", project=project
-        )
+        set_proxy_env(self.client, instance, project)
 
     def _collect_artifacts(self, instance: str, project: str) -> Optional[bytes]:
         """tar.gz of BUILD_OUT_DIR, via a staged file + `file_pull` — the same pattern export.py
