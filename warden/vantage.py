@@ -47,6 +47,14 @@ class VantageError(RuntimeError):
     raised for the VM already existing; that's the success path this module exists for."""
 
 
+class VantageProjectConflict(VantageError):
+    """The target project already exists and already hosts instance(s) that aren't the vantage VM
+    itself. `ensure_build_vm_substrate` converges that project's network policy — doing that against
+    a project with unknown tenants is exactly what broke `cta-dev-vm` on pop-os's `default` project
+    (real-host incident, VANTAGE-PLAN.md phase 1). Refuses rather than guessing whether it's safe;
+    a project that's brand new, empty, or already only hosts this VM converges without complaint."""
+
+
 @dataclass(frozen=True)
 class VantageInfo:
     name: str
@@ -54,6 +62,19 @@ class VantageInfo:
     #: False when `ensure_vantage_vm` found it already running and did nothing — the common case
     #: after the first call, and the whole point of create-if-absent over create-and-destroy.
     created: bool
+
+
+def _refuse_if_foreign(client, project: str, name: str) -> None:
+    if not client.project_exists(project):
+        return  # brand new - nothing to collide with
+    others = [n for n in client.list_instances(project) if n != name]
+    if others:
+        raise VantageProjectConflict(
+            f"project {project!r} already exists and already hosts instance(s) {others} that "
+            f"aren't {name!r} — refusing to converge its network policy onto them. Pass a project "
+            f"dedicated to warden's own infrastructure (e.g. the default {DEFAULT_PROJECT!r}), or "
+            f"clean up the collision by hand first."
+        )
 
 
 def _wait_ready(client, instance: str, project: str, timeout: float = WAIT_READY_TIMEOUT) -> None:
@@ -80,13 +101,16 @@ def ensure_vantage_vm(
     """Create-if-absent: return the existing vantage VM if one is already running, otherwise stand
     one up. Reuses `ensure_build_vm_substrate` (pool/project/network/ACL — identical to the
     container path's, per that method's own docstring) and `build_vm_profile` (the same VM profile
-    shape `build_vm.py` already validates) unmodified; the only new logic here is the existence
-    check. No golden-image launch yet (VANTAGE-PLAN.md phase 2/3) — always the stock image today.
+    shape `build_vm.py` already validates) unmodified; the new logic here is the existence check
+    plus `_refuse_if_foreign` — raises `VantageProjectConflict` rather than converging network
+    policy onto a project that already has other tenants in it. No golden-image launch yet
+    (VANTAGE-PLAN.md phase 2/3) — always the stock image today.
     """
     client = app.client
     if client.instance_exists(name, project):
         return VantageInfo(name=name, project=project, created=False)
 
+    _refuse_if_foreign(client, project, name)
     profile_spec = build_vm_profile(name=PROFILE_NAME, mem=mem, cpu=cpu, pool=app.pool)
     app.ensure_build_vm_substrate(project, profile_spec)
     client.launch(IMAGE, name, project, profile_spec.name, instance_type="virtual-machine")
