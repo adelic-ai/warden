@@ -628,3 +628,29 @@ fork-gap verdict, because "a validated finding with no in-repo test" is exactly 
 ship. The `matched = matched_pid is not None` UNEVALUABLE accounting (elsewhere in this log) is the
 report-side companion; note also that `report.py`'s `not_evaluated_by_comm` currently omits unevaluable
 execs (19/37 invisible in the calibration run) — under-disclosure to fix alongside.
+
+## D29 — `install-incus-nested.sh` had drifted from `profiles.py`, and its pool init was stale for Incus ≥7.x
+
+Standing up a fresh nested-Incus vantage (`apt install incus` + `incus admin init`, first-time-mold
+territory — Shape A's prerequisite) surfaced two bugs in `scripts/install-incus-nested.sh`, neither
+caught until an actual first-run attempt hit them.
+
+**The pool init failed outright.** The script `truncate`d a btrfs image at `/var/lib/incus/wardenpool.img`
+and pointed `incus admin init --preseed` at it via `source: <path>`. Incus ≥7.x rejects a manually-supplied
+source path under `/var/lib/incus` ("Only allowed source path ..."), so `admin init` never completed.
+Fixed by dropping the manual image entirely and letting Incus loop-manage it itself via `size: 15GiB` —
+one line, no image lifecycle for the script to own.
+
+**`BRIDGE_SUBNET` had silently drifted.** The script still hardcoded `100.89.0.1/24`; `warden/profiles.py`
+moved to `172.29.0.1/24` at D21 and the script was never updated to match. This is not merely cosmetic:
+`ensure_substrate()` calls `network_set()` on the bridge to whatever `profiles.py` says, so on a host
+where the script's stale value had already brought the bridge up at `100.89.0.1/24`, the next `warden up`
+would silently reconfigure a live bridge's subnet out from under anything already using it. Two files
+encoding the same fact (`BRIDGE_SUBNET`) had no mechanism forcing them to agree — the setup script and
+the module it exists to mirror simply diverged.
+
+**Fix, not caught by any test.** Both are one-time host-provisioning script bugs; there is no `FakeIncus`
+seam that exercises `install-incus-nested.sh` itself, so this class of drift is only caught by an actual
+first-run. No test added — the honest fix here is documenting the value's source of truth (a comment in
+the script now points at `profiles.py`) so the next drift is at least legible, not a mechanism that
+prevents it.
