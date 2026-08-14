@@ -133,12 +133,17 @@ happen against `warden-mon` today, independent of phases 1–7.
 modes; the point of this section is pinning each one to the specific existing mechanism it must
 build on, so phases 1 and 5 don't grow bespoke, parallel versions of logic that already exists.
 
-- **VM boot.** `incus launch` is an Incus *operation* — exactly what `recover.py`'s L1 tier
-  (stuck-operation → `incus operation delete`, then retry) already exists to diagnose and self-heal.
-  Shape A's 20×6s poll-and-silently-give-up loop is what phase 1 must **not** keep: it should call
-  `run_with_recovery`/`diagnose_and_recover` (already imported in `cli.py` for the container path)
-  around VM launch, the same way `up()` already does, not write a second bespoke timeout loop next
-  to the one that already exists.
+- **VM boot — two different problems, not one.** `recover.py`'s L2 diagnosis ("hung instance") is
+  `incus exec <instance> -- /bin/true` failing to answer within `LIVENESS_PROBE_TIMEOUT` (15s), with
+  `incus restart --force` as the fix. That's safe for a container, which answers `exec` almost
+  immediately once `incus launch` returns. It is **not** safe applied to a freshly-launched VM: a VM
+  doesn't answer `exec` until its guest agent finishes booting, which Shape A's own transcript shows
+  taking up to ~120s cold. Routing initial launch through `diagnose_and_recover` unmodified would
+  misdiagnose a VM mid-first-boot as wedged within 15 seconds and force-restart it — interrupting a
+  normal boot, not recovering a stuck one. So: **first boot keeps Shape A's own patient
+  guest-agent poll** (bounded, no restart action, run once right after `incus launch` succeeds), and
+  only *after* the VM has come up once does `recover.py`'s L1/L2/L3 apply — unmodified, exactly as
+  it already does for containers — to diagnosing it going unresponsive later.
 - **The nested daemon.** Not new extension work — `IncusClient` is already a `Protocol`
   (`warden/incus.py`), with `RealIncusClient` as one concrete transport (shell out to local `incus`,
   through `elevate()`) and `FakeIncusClient` as another (the test double). A wedged nested daemon
