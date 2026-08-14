@@ -127,32 +127,37 @@ it is not something this plan sets up or re-derives.
 Phase 8, decoupled: install `bpftrace` on a vantage VM and close the P5 eBPF validation loop. Can
 happen against `warden-mon` today, independent of phases 1–7.
 
-## Failure handling — the part Shape A didn't need because a human was watching
+## Failure handling — reuse what warden already has, don't reinvent it per layer
 
-`warden/recover.py` already exists for wedged-substrate recovery, but it's scoped to one Incus
-daemon (L1 stuck operation, L2 hung instance, L3 wedged daemon — diagnosed L3-first so it never
-force-restarts against a daemon that's the actual problem). None of that knows a VM layer exists.
-Shape A tolerated every failure mode below by having a human watch and decide; unattended, none of
-them are handled:
+`warden/recover.py` and `warden/workload.py` already solved two of this plan's four new failure
+modes; the point of this section is pinning each one to the specific existing mechanism it must
+build on, so phases 1 and 5 don't grow bespoke, parallel versions of logic that already exists.
 
-- **VM boot.** Shape A polled the guest agent up to 20×6s and would have given up silently past
-  that — a fixed timeout, not a diagnosis-and-recover tier. Phase 1 needs at least the timeout made
-  explicit and surfaced as a real error, not silence.
-- **The unattended mold run.** Nothing bounds `install-incus-nested.sh` today. A human watched it in
-  Shape A; an apt lock or a stalled download hangs phase 2 forever with nothing to catch it. Needs a
-  wall-clock cap (`timeout(1)`-style, same pattern `ebpf_capture.capture_argv` already uses for
-  bpftrace) that fails loud rather than hanging.
-- **The nested daemon.** A genuinely new failure surface — `recover.py`'s tiers assume a local
-  socket; diagnosing a wedged *nested* Incus needs a second `IncusClient` whose transport is
-  `incus exec <vm> -- incus ...` instead. Real extension work for phase 5, not something the
-  existing module covers by accident.
-- **`warden dev`'s silent furnish.** Already a known gap (flagged by a peer session, not discovered
-  here): the furnish step is silent for minutes by design — the progress log isn't wired to the
-  CLI's stdout — which reads as hung but isn't. Tolerable with a human watching and knowing to wait;
-  actively dangerous once phase 5 drives this unattended, because there's no signal to distinguish
-  "still furnishing" from "actually stuck." Wiring that log to somewhere phase 5 can poll should
-  land *before* phase 5, not after — an automated caller can't apply the human judgment call that
-  made this tolerable in Shape A.
+- **VM boot.** `incus launch` is an Incus *operation* — exactly what `recover.py`'s L1 tier
+  (stuck-operation → `incus operation delete`, then retry) already exists to diagnose and self-heal.
+  Shape A's 20×6s poll-and-silently-give-up loop is what phase 1 must **not** keep: it should call
+  `run_with_recovery`/`diagnose_and_recover` (already imported in `cli.py` for the container path)
+  around VM launch, the same way `up()` already does, not write a second bespoke timeout loop next
+  to the one that already exists.
+- **The nested daemon.** Not new extension work — `IncusClient` is already a `Protocol`
+  (`warden/incus.py`), with `RealIncusClient` as one concrete transport (shell out to local `incus`,
+  through `elevate()`) and `FakeIncusClient` as another (the test double). A wedged nested daemon
+  needs a *third* transport, not a new diagnosis engine: a thin `RealIncusClient` variant whose
+  `_run` routes the same argv through `incus exec <vm> --project <p> -- incus ...` instead of
+  running it locally. Handed to the unmodified `diagnose_and_recover`, all three tiers work against
+  the nested daemon exactly as written — this is the Protocol boundary doing the job it exists for.
+- **The unattended mold run.** Nothing bounds `install-incus-nested.sh` today; a human watched it in
+  Shape A. Reuse the wall-clock-cap pattern already established for exactly this shape of problem —
+  `ebpf_capture.capture_argv`'s `timeout(1)`-wrapping of an unattended external process — rather
+  than inventing a second one.
+- **`warden dev`'s silent furnish.** Flagged by a peer session, not discovered here: the furnish step
+  is silent for minutes by design (the progress log isn't wired to the CLI's stdout), which reads as
+  hung but isn't — tolerable only because a human knows to wait. `workload.py` already has the right
+  shape for this exact problem: `run`'s `--timeout`/`DEFAULT_WALL_CLOCK_SECONDS`, where hitting the
+  cap is recorded as *truncated*, never silently swallowed as failure. Furnish should get the same
+  treatment — a wall-clock cap plus a truncated-not-failed result — instead of new progress-logging
+  machinery invented from scratch. Must land before phase 5, since an automated caller can't apply
+  the human judgment call that made silence tolerable in Shape A.
 
 ## Open questions to settle while building, not before
 
