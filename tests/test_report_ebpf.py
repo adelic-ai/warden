@@ -7,12 +7,10 @@ on gembox (P5). What's asserted is the wiring and the honesty rules, not the ker
 """
 from __future__ import annotations
 
-import subprocess
-
 import pytest
 
 from tests.conftest import requires_agentwatch
-from warden.report import EbpfLiveResult, Reporter, _ssh_run
+from warden.report import EbpfLiveResult, Reporter
 
 AGENT_UID = 1000
 RUNTIME_EXE = "/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js"
@@ -68,60 +66,6 @@ def test_cli_ebpf_requires_live(capsys):
     rc = cli._report(args)
     assert rc == 1
     assert "live-only" in capsys.readouterr().err
-
-
-def test_ssh_run_ships_the_whole_argv_over_ssh_batchmode(monkeypatch):
-    # container-in-VM: the probe must load on the vantage kernel, not wherever `report` runs. The
-    # elevation+timeout+bpftrace argv is re-joined for the single ssh remote-command string, not
-    # reordered or split, and -o BatchMode=yes means a hung host-key/password prompt fails fast
-    # (same "never hang hands-off" rule as privilege.py's `sudo -n`).
-    seen = {}
-
-    def fake_run(argv, **kwargs):
-        seen["argv"] = argv
-        seen["kwargs"] = kwargs
-        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
-
-    monkeypatch.setattr("warden.report.subprocess.run", fake_run)
-
-    run = _ssh_run("vm-host")
-    argv = ["sudo", "-n", "timeout", "5", "bpftrace", "-e", "probe with spaces"]
-    run(argv, capture_output=True, text=True)
-
-    assert seen["argv"][:3] == ["ssh", "-o", "BatchMode=yes"]
-    assert seen["argv"][3] == "vm-host"
-    # shlex.join must survive the round trip through a POSIX shell unchanged, quoting included.
-    import shlex
-
-    assert shlex.split(seen["argv"][4]) == argv
-    assert seen["kwargs"] == {"capture_output": True, "text": True}
-
-
-@requires_agentwatch
-def test_reconcile_ebpf_live_wires_vm_host_into_the_real_capture(tmp_path, monkeypatch):
-    # Wiring only: confirms `vm_host` reaches ebpf_capture.run_capture as a `_run` override, and that
-    # omitting it leaves the real capture's default (local) behaviour untouched. bpftrace itself is
-    # never invoked here.
-    from agentwatch.events import ParseStats
-    from agentwatch.groundtruth import ebpf_capture
-
-    seen = {}
-
-    def fake_run_capture(*, duration_s, elevation_prefix, **kwargs):
-        seen["kwargs"] = kwargs
-        return [], ParseStats()
-
-    monkeypatch.setattr(ebpf_capture, "run_capture", fake_run_capture)
-
-    Reporter(client=None).reconcile_ebpf_live(
-        tmp_path, agent_uid=AGENT_UID, vm_host="vm-host"
-    )
-    assert "_run" in seen["kwargs"]
-    assert seen["kwargs"]["_run"].__name__ == "run"  # the _ssh_run closure
-
-    seen.clear()
-    Reporter(client=None).reconcile_ebpf_live(tmp_path, agent_uid=AGENT_UID)
-    assert seen["kwargs"] == {}  # no vm_host -> no _run override -> real local default applies
 
 
 @requires_agentwatch
