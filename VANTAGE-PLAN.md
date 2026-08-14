@@ -104,10 +104,14 @@ phase 1 does.
 `incus`/`auditctl`/`ausearch`/`nft`, deliberately *not* `bpftrace`. Phase 1 assumes that grant exists;
 it is not something this plan sets up or re-derives.
 
-1. **Persistent vantage-VM lifecycle.** A create-if-absent counterpart to `build_vm.py`'s
-   create-and-destroy-per-build primitive — same VM-instance shape (`images:debian/12` today,
-   `<golden-alias>` once phase 2 exists), but the vantage VM survives across invocations like the
-   `dev` home it hosts does.
+1. **Persistent vantage-VM lifecycle — landed.** `warden/vantage.py`, `ensure_vantage_vm()`. A
+   create-if-absent counterpart to `build_vm.py`'s create-and-destroy-per-build primitive — same
+   VM-instance shape (`images:debian/12` today, `<golden-alias>` once phase 2 exists), but the
+   vantage VM survives across invocations like the `dev` home it hosts does. `_wait_ready` is the
+   first-boot poll from the failure-handling section below, not `recover.py`. 4 tests against
+   `FakeIncusClient` (`tests/test_vantage.py`); not yet run against pop-os — the fast-path/no-op
+   behavior, VM-vs-container instance type, and the wait-ready timeout are proven against the fake,
+   real cold-boot timing is not.
 2. **The mold.** Run `install-incus-nested.sh` (steps 1–5 above) end to end, unattended (no human
    answering prompts), then `scripts/verify-vantage-vm.py` to confirm warden + agentwatch actually
    import before trusting the image, then `incus stop` + `incus publish` to a local image alias.
