@@ -388,6 +388,23 @@ def _honesty_block() -> dict:
     }
 
 
+def _ssh_run(vm_host: str):
+    """A `subprocess.run`-shaped callable that executes the WHOLE argv on `vm_host` over ssh, for the
+    container-in-VM shape: the eBPF probe must load on the vantage kernel above the container, not on
+    whatever host `warden report` itself runs on. `ebpf_capture.capture_argv()` already orders
+    elevation before `timeout` before `bpftrace` correctly for a single local exec; ssh only accepts
+    one remote command string, so that argv is re-joined with shlex for the hop rather than re-ordered
+    or partially elevated. `BatchMode=yes` matches privilege.py's `sudo -n`: a hands-off run must fail
+    fast on a host-key or password prompt, not hang."""
+    import shlex
+
+    def run(argv, **kwargs):
+        remote_cmd = shlex.join(argv)
+        return subprocess.run(["ssh", "-o", "BatchMode=yes", vm_host, remote_cmd], **kwargs)
+
+    return run
+
+
 # --- the reporter -----------------------------------------------------------------------------
 
 
@@ -672,12 +689,20 @@ class Reporter:
         transcript_path: Optional[Path] = None,
         runtime: Optional[str] = None,
         host: Optional[str] = None,
+        vm_host: Optional[str] = None,
         _capture=None,
     ) -> EbpfLiveResult:
         """Decision B, live: agentwatch loads its OWN eBPF probe on the vantage and reads its own
         buffer; warden only supplies the privilege (`privilege.elevation_prefix()`) and invokes. The
         captured events reconcile through the SAME `run_once` the auditd path uses — no second
         reconciler, no lowered honesty bar (report.py's principle).
+
+        `vm_host`: the container-in-VM shape needs the probe loaded on the VM kernel ABOVE the
+        container, which is not necessarily the host `warden report` itself runs on. When set, the
+        real capture's whole argv — elevation, `timeout`, `bpftrace` — is shipped over ssh to run on
+        `vm_host` (`_ssh_run`), instead of executing locally. `elevation_prefix()` is still computed
+        and still travels with the argv; `sudo -n` must run on the vantage, not on the caller's host.
+        Omitted, behaviour is unchanged (local exec, as before P5's topology fix).
 
         This is a distinct entry point from `report()`, not a flag on it, because the capture models
         genuinely differ: auditd is a persistent log reconciled after the fact, while eBPF's ring
@@ -706,8 +731,14 @@ class Reporter:
         host = host or socket.gethostname()
         runtime = runtime or runtimes.CLAUDE.name  # the interactive dev-home default
         capture = _capture if _capture is not None else ebpf_capture.run_capture
+        # _run only makes sense against the real capture — a test double's `cap(*, duration_s,
+        # elevation_prefix)` has no _run parameter, and mocking bpftrace already stands in for
+        # wherever it would have run.
+        capture_kwargs = {"_run": _ssh_run(vm_host)} if (_capture is None and vm_host) else {}
 
-        events, stats = capture(duration_s=duration_s, elevation_prefix=elevation_prefix())
+        events, stats = capture(
+            duration_s=duration_s, elevation_prefix=elevation_prefix(), **capture_kwargs
+        )
         config = Config(
             agent_uid=agent_uid,
             transcript_paths=[transcript_path] if transcript_path else [],

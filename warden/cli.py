@@ -123,6 +123,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--capture-seconds", type=int, default=DEFAULT_EBPF_CAPTURE_SECONDS, dest="capture_seconds",
         help=f"eBPF live-capture window in seconds (default {DEFAULT_EBPF_CAPTURE_SECONDS}; --ebpf only)",
     )
+    report.add_argument(
+        "--vm-host", default=None, dest="vm_host",
+        help="SSH target for the vantage kernel above the container (container-in-VM shape; --ebpf "
+             "only). Omit to run the probe on the host warden itself runs on, as before.",
+    )
 
     export = sub.add_parser("export", help="tar everything out: copy all, nothing summarised")
     export.add_argument("dest", type=Path, help="directory to write the tarball into")
@@ -400,6 +405,7 @@ def _report(args: argparse.Namespace) -> int:
                 transcript_path=transcript_path,
                 runtime=manifest.agentwatch_runtime,
                 host=args.host,
+                vm_host=args.vm_host,
             )
             print(
                 f"eBPF live reconcile ({result.capture_window_s}s window): "
