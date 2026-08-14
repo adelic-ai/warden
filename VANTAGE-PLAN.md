@@ -120,16 +120,24 @@ it is not something this plan sets up or re-derives.
    (same one `build_vm.py`'s own builds already use). The underlying atomicity gap —
    `ensure_build_vm_substrate` has no rollback on a mid-loop failure — is still there; noted, not
    fixed, since the actual fix here was not triggering the conflict at all.
-2. **The mold.** Run `install-incus-nested.sh` (steps 1–5 above) end to end, unattended (no human
-   answering prompts), then `scripts/verify-vantage-vm.py` to confirm warden + agentwatch actually
-   import before trusting the image, then `incus stop` + `incus publish` to a local image alias.
-   Triggered manually for now (a rebuild command), not on every `dev`.
+2. **The mold — landed, not yet run for real.** `warden/mold.py`, `build_vantage_mold()`. Egress
+   check, apt prereqs (`curl`/`ca-certificates`/`git` — stable OS tooling baked in once, unlike
+   warden/agentwatch), push + run `install-incus-nested.sh` (steps 1–5 above, in one pass now that
+   D29 is on `main` — no mid-build patch needed), an inline dependency check
+   (`incus version && python3 --version && git --version`), `stop` + `publish` to a local image
+   alias, tear down the build instance. **Correction from the original plan:** this does *not* use
+   `scripts/verify-vantage-vm.py` — that script checks warden/agentwatch imports, and the mold
+   deliberately never has either deployed (design goals: code stays out of the golden image). Using
+   it here would fail every mold run for a reason that has nothing to do with the mold. It stays
+   scoped to phase 4, where warden/agentwatch actually exist to check. New `IncusClient` primitives
+   this needed: `stop`, `image_exists`, `publish` (Protocol + Real + Fake). 4 tests against
+   `FakeIncusClient`; the actual apt/zabbly/`admin init` behavior is unverified against pop-os.
 3. **Fast launch.** Point phase 1's lifecycle at the golden alias instead of the stock image.
 4. **Code deploy.** Script steps 6–7 — bundle-push-clone warden + agentwatch onto the VM every
    launch, from whatever's checked out locally (not a pinned branch), then
-   `scripts/verify-vantage-vm.py` again post-deploy — the golden image verifies Incus is sound at
-   mold time; this verifies the *fresh* code is sound at launch time, since that's what changes every
-   time and what D29-class drift would show up in.
+   `scripts/verify-vantage-vm.py` post-deploy — this is the phase it actually belongs to, verifying
+   the *fresh* code (the thing that changes every launch, and what D29-class drift would show up in),
+   not the mold.
 5. **Remote-drive container creation.** Invoke step 8's `warden dev`-equivalent over `incus exec`
    from the base host. No container-side code changes expected — this already worked as-is.
 6. **File transfer verbs.** `warden push`/`warden pull` (naming TBD) wrapping `incus file push/pull`,
