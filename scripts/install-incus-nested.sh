@@ -19,9 +19,11 @@ fi
 # Keep these in sync with warden/profiles.py — they're the same substrate.
 STORAGE_POOL="wardenpool"
 BRIDGE="wardenbr0"
-BRIDGE_SUBNET="100.89.0.1/24"
-POOL_IMG="/var/lib/incus/${STORAGE_POOL}.img"
-POOL_SIZE="20GiB"
+# MUST match warden/profiles.py BRIDGE_SUBNET (D21 moved it 100.89 -> 172.29; this script had drifted).
+# warden's ensure_substrate() network_set()s the bridge to this value, so a mismatch means warden
+# reconfigures the bridge's subnet out from under a running container. Keep the two in lockstep.
+BRIDGE_SUBNET="172.29.0.1/24"
+POOL_SIZE="15GiB"
 
 if ! command -v incus >/dev/null 2>&1; then
   echo "== installing incus (zabbly repo) =="
@@ -54,16 +56,14 @@ if grep -qx "${STORAGE_POOL}" <<<"${existing_pools}"; then
   echo "== storage pool ${STORAGE_POOL} already exists, skipping admin init =="
 else
   echo "== incus admin init: throwaway btrfs pool + pinned bridge =="
-  mkdir -p "$(dirname "${POOL_IMG}")"
-  if [[ ! -f "${POOL_IMG}" ]]; then
-    truncate -s "${POOL_SIZE}" "${POOL_IMG}"
-  fi
+  # Loop-backed btrfs via `size` — incus manages the image under its own storage-pools dir. A manual
+  # `source:` image under /var/lib/incus is rejected by incus >= 7.x ("Only allowed source path ...").
   incus admin init --preseed <<PRESEED
 storage_pools:
 - name: ${STORAGE_POOL}
   driver: btrfs
   config:
-    source: ${POOL_IMG}
+    size: ${POOL_SIZE}
 networks:
 - name: ${BRIDGE}
   type: bridge
