@@ -120,36 +120,42 @@ it is not something this plan sets up or re-derives.
    (same one `build_vm.py`'s own builds already use). The underlying atomicity gap —
    `ensure_build_vm_substrate` has no rollback on a mid-loop failure — is still there; noted, not
    fixed, since the actual fix here was not triggering the conflict at all.
-2. **The mold — code landed, real-host validation BLOCKED, not sufficient to build on.** `warden/mold.py`,
-   `build_vantage_mold()`. Egress check, apt prereqs (`curl`/`ca-certificates`/`git`), push + run
-   `install-incus-nested.sh`, an inline dependency check, `stop` + `publish` to a local image alias,
-   tear down. 5 tests against `FakeIncusClient`.
+2. **The mold — landed and validated for real.** `warden/mold.py`, `build_vantage_mold()`. Egress
+   check, apt prereqs (`curl`/`ca-certificates`/`git`), push + run `install-incus-nested.sh`, an
+   inline dependency check, `stop` + `publish` to a local image alias, tear down. 5 tests against
+   `FakeIncusClient`, **plus a real published image on pop-os**: `warden-vantage-golden`,
+   fingerprint `4801d10909d6`, 1264.87 MiB, published 2026-08-14 14:02 EDT — confirmed via
+   `incus image list`, not inferred. The build instance was gone afterward, which only happens on
+   `mold.py`'s success path (`client.delete` runs only after `publish` succeeds).
 
-   **Be precise about what "landed" means here: the mold has never once produced its actual
-   deliverable.** No golden image has ever been published. Four consecutive real-host runs all died
-   at the same step — `apt-get install incus incus-client btrfs-progs` stalls in `dpkg --unpack`
-   (`D` state, near-zero CPU) and hits the 600s exec timeout every time, even after fixing two real
-   bugs the runs surfaced (see below) and stopping `warden-mon`/`cta-dev-vm` to rule out VM
-   contention — load dropped from ~3.0 to ~0.9 immediately after stopping them, then climbed back to
-   3.3 on its own with both stopped, meaning something outside our own VMs (other host activity,
-   `wardenpool`'s single loop-mounted-file backing) is contributing too. Root cause is **not
-   isolated** — `gembox`'s scoped sudo has no `btrfs`-level diagnostics, so this could not be dug
-   into further this session. **Phase 3 cannot start for real** — it's defined as "point phase 1 at
-   the golden alias," and there is no golden alias to point at. Phase 3's code could be written
-   speculatively, but not tested against anything real, which is not the same as being done.
-
-   Two real bugs were found and fixed along the way, independent of the still-open stall: (1) the
-   mold originally never wired the guest through warden's own proxy or populated its allowlist —
-   `apt` got "Network is unreachable" outright, not a mold-specific bug but a real gap
-   (`set_proxy_env` + `MOLD_ALLOWLIST = DEBIAN_SETUP + pkgs.zabbly.com`, now fixed); (2) the egress
+   **This took five real-host attempts, and the first four failures were genuinely informative, not
+   noise.** All four died at the identical step — `apt-get install incus incus-client btrfs-progs`
+   stalling in `dpkg --unpack` (`D` state, near-zero CPU) — and two real bugs got found and fixed
+   along the way, independent of the eventual timeout fix: (1) the mold originally never wired the
+   guest through warden's own proxy or populated its allowlist — `apt` got "Network is unreachable"
+   outright (`set_proxy_env` + `MOLD_ALLOWLIST = DEBIAN_SETUP + pkgs.zabbly.com`); (2) the egress
    check's `sh -c "apt-get update | tail -3"` masked apt-get's real exit code with tail's — fixed to
    `bash -c "set -o pipefail; ..."`. Neither fake test could have caught either; `FakeIncusClient`'s
-   substring-matching exec() can't model proxy routing or shell pipe semantics.
+   substring-matching `exec()` can't model proxy routing or shell pipe semantics.
+
+   **The actual fifth-attempt fix was recognizing the 600s timeout was unrealistic, not that
+   something was broken.** `pop-os` turned out to be an active desktop (two logged-in users, GNOME,
+   several Chrome instances) under real contention, not a dedicated build host — a fresh, empty
+   storage pool made no difference (ruled out `wardenpool` fragmentation specifically), and host
+   disk showed zero IOs in progress while the guest sat blocked (ruled out raw disk saturation).
+   `INSTALL_TIMEOUT` went 600s → 1800s, `PREREQ_INSTALL_TIMEOUT` 120s → 300s, and the fifth attempt
+   — after also logging out the second user and closing the first user's browser to further reduce
+   contention — completed and published cleanly. Worth remembering: the timeout bump alone might
+   have been sufficient even without the user/process cleanup; both changed at once, so which one
+   was load-bearing isn't fully isolated.
 
    **Correction from the original plan, still true:** this does *not* use `scripts/verify-vantage-vm.py`
    — that checks warden/agentwatch imports, which the mold deliberately never has deployed. Stays
    scoped to phase 4.
-3. **Fast launch.** Point phase 1's lifecycle at the golden alias instead of the stock image.
+3. **Fast launch — unblocked, real golden alias now exists (`warden-vantage-golden`).** Point phase
+   1's `ensure_vantage_vm()` at it instead of `IMAGE` (`images:debian/12`), and verify a launch from
+   it actually skips `apt`/`admin init` entirely and comes up ready in seconds, not minutes — that's
+   the whole point of molding once. Not yet done.
 4. **Code deploy.** Script steps 6–7 — bundle-push-clone warden + agentwatch onto the VM every
    launch, from whatever's checked out locally (not a pinned branch), then
    `scripts/verify-vantage-vm.py` post-deploy — this is the phase it actually belongs to, verifying
