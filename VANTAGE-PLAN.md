@@ -127,6 +127,33 @@ it is not something this plan sets up or re-derives.
 Phase 8, decoupled: install `bpftrace` on a vantage VM and close the P5 eBPF validation loop. Can
 happen against `warden-mon` today, independent of phases 1–7.
 
+## Failure handling — the part Shape A didn't need because a human was watching
+
+`warden/recover.py` already exists for wedged-substrate recovery, but it's scoped to one Incus
+daemon (L1 stuck operation, L2 hung instance, L3 wedged daemon — diagnosed L3-first so it never
+force-restarts against a daemon that's the actual problem). None of that knows a VM layer exists.
+Shape A tolerated every failure mode below by having a human watch and decide; unattended, none of
+them are handled:
+
+- **VM boot.** Shape A polled the guest agent up to 20×6s and would have given up silently past
+  that — a fixed timeout, not a diagnosis-and-recover tier. Phase 1 needs at least the timeout made
+  explicit and surfaced as a real error, not silence.
+- **The unattended mold run.** Nothing bounds `install-incus-nested.sh` today. A human watched it in
+  Shape A; an apt lock or a stalled download hangs phase 2 forever with nothing to catch it. Needs a
+  wall-clock cap (`timeout(1)`-style, same pattern `ebpf_capture.capture_argv` already uses for
+  bpftrace) that fails loud rather than hanging.
+- **The nested daemon.** A genuinely new failure surface — `recover.py`'s tiers assume a local
+  socket; diagnosing a wedged *nested* Incus needs a second `IncusClient` whose transport is
+  `incus exec <vm> -- incus ...` instead. Real extension work for phase 5, not something the
+  existing module covers by accident.
+- **`warden dev`'s silent furnish.** Already a known gap (flagged by a peer session, not discovered
+  here): the furnish step is silent for minutes by design — the progress log isn't wired to the
+  CLI's stdout — which reads as hung but isn't. Tolerable with a human watching and knowing to wait;
+  actively dangerous once phase 5 drives this unattended, because there's no signal to distinguish
+  "still furnishing" from "actually stuck." Wiring that log to somewhere phase 5 can poll should
+  land *before* phase 5, not after — an automated caller can't apply the human judgment call that
+  made this tolerable in Shape A.
+
 ## Open questions to settle while building, not before
 
 - **VM lifecycle vs. `dev` home lifecycle.** Does `warden down` tear down the vantage VM, or only the
