@@ -9,7 +9,7 @@ So this module reuses `build_vm.py`'s substrate/profile/wait-ready pieces (`ensu
 `build_vm_profile`, the wait-ready poll shape) and adds the one thing that path deliberately has
 none of: create-if-absent instead of create-and-destroy.
 
-`_wait_ready` is intentionally NOT `warden/recover.py`'s wedge diagnosis. Applying `recover.py`'s L2
+`wait_ready` is intentionally NOT `warden/recover.py`'s wedge diagnosis. Applying `recover.py`'s L2
 tier (exec fails to answer within 15s -> force-restart) to a VM's first boot would misdiagnose normal
 boot time as a wedge and force-restart a VM that was never stuck — a VM doesn't answer `exec` until
 its guest agent comes up, which VANTAGE-PLAN.md's reference build observed taking up to ~120s cold.
@@ -64,7 +64,7 @@ class VantageInfo:
     created: bool
 
 
-def _refuse_if_foreign(client, project: str, name: str) -> None:
+def refuse_if_foreign(client, project: str, name: str) -> None:
     if not client.project_exists(project):
         return  # brand new - nothing to collide with
     others = [n for n in client.list_instances(project) if n != name]
@@ -77,7 +77,7 @@ def _refuse_if_foreign(client, project: str, name: str) -> None:
         )
 
 
-def _wait_ready(client, instance: str, project: str, timeout: float = WAIT_READY_TIMEOUT) -> None:
+def wait_ready(client, instance: str, project: str, timeout: float = WAIT_READY_TIMEOUT) -> None:
     deadline = time.monotonic() + timeout
     last = ""
     while time.monotonic() < deadline:
@@ -102,7 +102,7 @@ def ensure_vantage_vm(
     one up. Reuses `ensure_build_vm_substrate` (pool/project/network/ACL — identical to the
     container path's, per that method's own docstring) and `build_vm_profile` (the same VM profile
     shape `build_vm.py` already validates) unmodified; the new logic here is the existence check
-    plus `_refuse_if_foreign` — raises `VantageProjectConflict` rather than converging network
+    plus `refuse_if_foreign` — raises `VantageProjectConflict` rather than converging network
     policy onto a project that already has other tenants in it. No golden-image launch yet
     (VANTAGE-PLAN.md phase 2/3) — always the stock image today.
     """
@@ -110,9 +110,9 @@ def ensure_vantage_vm(
     if client.instance_exists(name, project):
         return VantageInfo(name=name, project=project, created=False)
 
-    _refuse_if_foreign(client, project, name)
+    refuse_if_foreign(client, project, name)
     profile_spec = build_vm_profile(name=PROFILE_NAME, mem=mem, cpu=cpu, pool=app.pool)
     app.ensure_build_vm_substrate(project, profile_spec)
     client.launch(IMAGE, name, project, profile_spec.name, instance_type="virtual-machine")
-    _wait_ready(client, name, project)
+    wait_ready(client, name, project)
     return VantageInfo(name=name, project=project, created=True)

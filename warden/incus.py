@@ -150,6 +150,10 @@ class IncusClient(Protocol):
     def restore(self, name: str, snapshot: str, project: str = "default") -> None: ...
     def delete(self, name: str, project: str = "default") -> None: ...
     def list_instances(self, project: str) -> list[str]: ...
+    def stop(self, name: str, project: str = "default", force: bool = False) -> None: ...
+    # -- image publishing (VANTAGE-PLAN.md phase 2, the mold) ---------------
+    def image_exists(self, alias: str, project: str = "default") -> bool: ...
+    def publish(self, name: str, alias: str, project: str = "default") -> str: ...
     # -- operational recovery (warden/recover.py) --
     def responsive(self, timeout: float = QUERY_TIMEOUT) -> bool: ...
     def operations(self) -> list[dict]: ...
@@ -398,6 +402,31 @@ class RealIncusClient:
     def list_instances(self, project: str) -> list[str]:
         proc = self._run_ok(["list", "--project", project, "--format", "json"])
         return [item["name"] for item in json.loads(proc.stdout)]
+
+    def stop(self, name: str, project: str = "default", force: bool = False) -> None:
+        argv = ["stop", name, "--project", project]
+        if force:
+            argv.append("--force")
+        self._run_ok(argv, timeout=LIFECYCLE_TIMEOUT)
+
+    # -- image publishing (VANTAGE-PLAN.md phase 2, the mold) -----------------
+    def image_exists(self, alias: str, project: str = "default") -> bool:
+        proc = self._run_ok(["image", "list", alias, "--project", project, "--format", "json"])
+        return len(json.loads(proc.stdout or "[]")) > 0
+
+    def publish(self, name: str, alias: str, project: str = "default") -> str:
+        """Publish a (stopped) instance to a local image under `alias`. Returns the fingerprint —
+        `incus publish`'s own success line is "Instance published with fingerprint: <hash>"; parsed
+        rather than trusted to a fixed column position, and falls back to the raw line if the
+        format ever drifts (same dialect-tolerance principle as auditd.py's parsing)."""
+        proc = self._run_ok(
+            ["publish", name, "--project", project, "--alias", alias], timeout=LIFECYCLE_TIMEOUT
+        )
+        stdout = proc.stdout.strip()
+        marker = "fingerprint:"
+        if marker in stdout:
+            return stdout.rsplit(marker, 1)[1].strip()
+        return stdout
 
     # -- operational recovery (see warden/recover.py) ------------------------
     def responsive(self, timeout: float = QUERY_TIMEOUT) -> bool:

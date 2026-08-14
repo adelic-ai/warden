@@ -104,10 +104,10 @@ def test_empty_preexisting_project_is_not_foreign():
 def test_wait_ready_raises_vantage_error_not_silent_timeout_on_a_wedged_boot():
     # A VM whose guest agent never comes up must fail loudly, not hang or silently give up —
     # VANTAGE-PLAN.md's failure-handling section: first boot is not recover.py's problem, but it
-    # still must not be silence. Calls _wait_ready directly with a small timeout rather than going
+    # still must not be silence. Calls wait_ready directly with a small timeout rather than going
     # through ensure_vantage_vm, which hardcodes the real 120s bound - not something a unit test
     # should actually wait out.
-    from warden.vantage import _wait_ready
+    from warden.vantage import wait_ready
 
     client = FakeIncusClient()
     app = _app(client)
@@ -117,4 +117,4 @@ def test_wait_ready_raises_vantage_error_not_silent_timeout_on_a_wedged_boot():
     client._hung.add("warden-vantage-stuck")
 
     with pytest.raises(VantageError, match="not ready within"):
-        _wait_ready(client, "warden-vantage-stuck", DEFAULT_PROJECT, timeout=0.2)
+        wait_ready(client, "warden-vantage-stuck", DEFAULT_PROJECT, timeout=0.2)

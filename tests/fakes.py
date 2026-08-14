@@ -53,6 +53,7 @@ class FakeIncusClient:
         self.instances: dict[tuple[str, str], _Instance] = {}
         self.storage_pools: dict[str, str] = {}
         self.network_acls: dict[str, dict] = {}
+        self.images: dict[str, str] = {}  # alias -> fingerprint (VANTAGE-PLAN.md phase 2)
         self.audit_log: list[AuditEvent] = []
         self.exec_calls: list[tuple[str, list[str]]] = []
         # substring of the joined argv -> the ExecResult to return. Named `failures` because that
@@ -266,6 +267,19 @@ class FakeIncusClient:
 
     def list_instances(self, project: str) -> list[str]:
         return [n for (p, n) in self.instances if p == project]
+
+    def stop(self, name: str, project: str = "default", force: bool = False) -> None:
+        self._require_instance(name, project).running = False
+
+    # -- image publishing (VANTAGE-PLAN.md phase 2, the mold) -----------------
+    def image_exists(self, alias: str, project: str = "default") -> bool:
+        return alias in self.images
+
+    def publish(self, name: str, alias: str, project: str = "default") -> str:
+        self._require_instance(name, project)
+        fingerprint = f"fake-fingerprint-{alias}"
+        self.images[alias] = fingerprint
+        return fingerprint
 
     # -- operational recovery (simulatable via the knobs in __init__) --------
     def responsive(self, timeout: float = 60.0) -> bool:
