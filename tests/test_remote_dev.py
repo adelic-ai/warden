@@ -9,7 +9,7 @@ import pytest
 from tests.fakes import FakeIncusClient, FakeProxyAllowlistController
 from warden.app import WardenApp
 from warden.incus import ExecResult
-from warden.remote_dev import DEFAULT_DEV_NAME, RemoteDevError, create_nested_dev
+from warden.remote_dev import DEFAULT_DEV_NAME, NESTED_IMAGE_HOST, RemoteDevError, create_nested_dev
 from warden.vantage import DEFAULT_PROJECT
 
 VANTAGE_INSTANCE = "warden-vantage"
@@ -44,6 +44,27 @@ def test_create_nested_dev_happy_path_verifies_against_nested_incus():
     assert len(dev_calls) == 1
     assert "--no-shell" in dev_calls[0]
     assert "--llm" in dev_calls[0] and "claude" in dev_calls[0]
+    # nested incusd's own proxy config gets set before dev runs, not skipped
+    proxy_calls = [argv for n, argv in client.exec_calls if "core.proxy_https" in " ".join(argv)]
+    assert len(proxy_calls) == 1
+    proxy_call_index = client.exec_calls.index((VANTAGE_INSTANCE, proxy_calls[0]))
+    dev_call_index = client.exec_calls.index((VANTAGE_INSTANCE, dev_calls[0]))
+    assert proxy_call_index < dev_call_index
+    # the outer allowlist was opened to the nested image host
+    assert app.proxy_controller.current == (NESTED_IMAGE_HOST,)
+
+
+def test_nested_proxy_config_failure_raises_before_attempting_dev():
+    client = FakeIncusClient()
+    app = _app(client)
+    _launched_vantage(client)
+    client.exec_failures["core.proxy_https"] = ExecResult(1, "", "Error: not a server-level key")
+
+    with pytest.raises(RemoteDevError, match="proxy"):
+        create_nested_dev(app, vantage_instance=VANTAGE_INSTANCE, llm="claude")
+
+    dev_calls = [argv for n, argv in client.exec_calls if "warden.cli" in " ".join(argv)]
+    assert dev_calls == []  # never got that far
 
 
 def test_dev_command_failure_raises_remote_dev_error():

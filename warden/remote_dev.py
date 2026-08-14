@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from warden.profiles import BRIDGE_GATEWAY, PROXY_PORT
 from warden.vantage import DEFAULT_PROJECT
 
 if TYPE_CHECKING:
@@ -21,6 +22,15 @@ DEFAULT_DEV_NAME = "warden-dev"
 #: module tree, but agentwatch costs nothing to include and matches what Shape A actually had
 #: present when it ran this by hand.
 REMOTE_PYTHONPATH = "/root/warden:/root/agentwatch"
+
+#: Real-host lesson: `incus launch images:debian/12 ...` inside the vantage VM needs the NESTED
+#: incusd itself to reach images.linuxcontainers.org, and mold.py's set_proxy_env doesn't cover
+#: this — that sets environment.* config, which only applies to processes spawned per incus-exec
+#: call, not to a persistent systemd service like the nested incusd that's been running since boot.
+#: The nested daemon needs its own server-level proxy config instead (core.proxy_https/proxy_http,
+#: real Incus config keys, confirmed by `incus config get` succeeding rather than erroring).
+NESTED_IMAGE_HOST = "images.linuxcontainers.org"
+OUTER_PROXY_URL = f"http://{BRIDGE_GATEWAY}:{PROXY_PORT}"
 
 #: Furnishing a fresh dev home is slow and — a known, not-yet-fixed gap (VANTAGE-PLAN.md's
 #: failure-handling section: the progress log isn't wired to the CLI's stdout) — silent while it
@@ -60,8 +70,28 @@ def create_nested_dev(
     """Runs `python3 -m warden.cli dev --llm <llm> --name <name> --mem <mem> --cpu <cpu> --no-shell`
     inside `vantage_instance`. `--no-shell` matches Shape A: an unattended, scripted invocation has
     no interactive terminal to drop into anyway.
+
+    Before that: points the vantage VM's own nested incusd at the outer proxy (server-level config,
+    not per-exec environment — see `OUTER_PROXY_URL`'s docstring) and opens the outer proxy's
+    allowlist to `NESTED_IMAGE_HOST`, replacing whatever was there (the mold's apt-era entries are
+    no longer relevant by the time this runs — a later call, a different purpose, same
+    provisioning-vs-runtime narrowing discipline `submit_build` already uses elsewhere).
     """
     client = app.client
+    if app.proxy_controller is not None:
+        app.proxy_controller.set_allowlist((NESTED_IMAGE_HOST,))
+    proxy_cfg = client.exec(
+        vantage_instance,
+        ["incus", "config", "set",
+         "core.proxy_https", OUTER_PROXY_URL, "core.proxy_http", OUTER_PROXY_URL],
+        project=vantage_project, timeout=VERIFY_TIMEOUT,
+    )
+    if not proxy_cfg.ok:
+        raise RemoteDevError(
+            f"{vantage_instance}: could not configure the nested incusd's proxy "
+            f"(core.proxy_https/proxy_http): {(proxy_cfg.stderr or proxy_cfg.stdout).strip()[:500]}"
+        )
+
     argv = [
         "python3", "-m", "warden.cli", "dev",
         "--llm", llm, "--name", name, "--mem", mem, "--cpu", cpu, "--no-shell",
