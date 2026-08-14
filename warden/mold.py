@@ -41,12 +41,20 @@ PREREQ_PACKAGES = ("curl", "ca-certificates", "git")
 MOLD_ALLOWLIST: tuple[str, ...] = (*DEBIAN_SETUP, "pkgs.zabbly.com")
 
 EGRESS_CHECK_TIMEOUT = 60.0
-PREREQ_INSTALL_TIMEOUT = 120.0
+PREREQ_INSTALL_TIMEOUT = 300.0
 #: install-incus-nested.sh: apt + the zabbly repo + `incus admin init`. Generous but bounded — an
 #: unattended run that hangs (apt lock, stalled download) must fail loud, not hang forever
 #: (VANTAGE-PLAN.md's failure-handling section). Reuses exec()'s own timeout param rather than a
 #: shell-level `timeout(1)` wrap — the mechanism already exists, no need to reinvent it here.
-INSTALL_TIMEOUT = 600.0
+#:
+#: 600s was the original bound and was wrong, not conservative — real-host runs on pop-os (an
+#: active desktop with two logged-in users and their own Chrome/GNOME load, not a dedicated build
+#: box) showed dpkg genuinely still making progress (nonzero, slowly climbing CPU time) well past
+#: 600s under real contention, not stuck. A fresh, empty storage pool made no difference (ruling
+#: out wardenpool fragmentation specifically), and the host disk itself showed zero IOs in
+#: progress while the guest sat in D-state — the bottleneck is contention for the shared host's
+#: CPU/scheduler, not a hang. 1800s gives real headroom without being unbounded.
+INSTALL_TIMEOUT = 1800.0
 DEP_CHECK_TIMEOUT = 30.0
 
 
