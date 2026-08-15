@@ -21,8 +21,10 @@ STORAGE_POOL="wardenpool"
 BRIDGE="wardenbr0"
 # MUST match warden/profiles.py BRIDGE_SUBNET (D21 moved it 100.89 -> 172.29; this script had drifted).
 # warden's ensure_substrate() network_set()s the bridge to this value, so a mismatch means warden
-# reconfigures the bridge's subnet out from under a running container. Keep the two in lockstep.
-BRIDGE_SUBNET="172.29.0.1/24"
+# reconfigures the bridge's subnet out from under a running container. Keep the two in lockstep —
+# same WARDEN_NESTED_BRIDGE_SUBNET override profiles.py reads, for the same reason (VANTAGE-PLAN.md:
+# a nested wardenbr0 reusing the outer bridge's exact subnet locally shadows it inside the guest).
+BRIDGE_SUBNET="${WARDEN_NESTED_BRIDGE_SUBNET:-172.29.0.1/24}"
 POOL_SIZE="15GiB"
 
 if ! command -v incus >/dev/null 2>&1; then

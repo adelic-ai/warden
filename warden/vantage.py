@@ -40,6 +40,15 @@ PROFILE_NAME = "warden-vantage-vm"
 #: would be circular.
 GOLDEN_ALIAS = "warden-vantage-golden"
 
+#: The nested wardenbr0's subnet — deliberately different from `profiles.BRIDGE_SUBNET`
+#: (172.29.0.1/24), which the OUTER bridge a vantage VM's own NIC sits on already uses. Reusing it
+#: for the nested bridge too means the nested interface locally shadows that address inside the
+#: guest, so anything inside the VM trying to reach 172.29.0.1 (the outer proxy) resolves to its
+#: own local interface instead and never leaves — real-host incident, phase 5. mold.py and
+#: remote_dev.py both pass this via profiles.NESTED_BRIDGE_SUBNET_ENV_VAR when driving anything
+#: that runs *inside* a vantage VM; every other, non-nested caller is unaffected.
+NESTED_BRIDGE_SUBNET = "172.30.0.1/24"
+
 #: Bounding the per-attempt liveness exec while waiting for the guest agent.
 PROBE_TIMEOUT = 15.0
 #: Matches build_vm.BuildVmRunner.WAIT_READY_TIMEOUT and VANTAGE-PLAN.md's observed cold-boot time

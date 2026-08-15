@@ -20,10 +20,19 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from ipaddress import ip_interface, ip_network
 
 from warden.egress import ACL_NAME as EGRESS_ACL_NAME
+
+#: Override hook for the container-in-VM shape (VANTAGE-PLAN.md): a vantage VM's own nested
+#: wardenbr0 must NOT reuse the outer wardenbr0's exact subnet, or the nested bridge locally
+#: shadows the outer gateway's address inside the guest — any connection to it resolves to the
+#: guest's own local interface, never reaching the actual outer proxy (real-host incident, phase
+#: 5). Unset by default, so every existing bare-host/outer caller is unaffected; set only when
+#: driving a nested install (mold.py) or a nested `warden dev` (remote_dev.py).
+NESTED_BRIDGE_SUBNET_ENV_VAR = "WARDEN_NESTED_BRIDGE_SUBNET"
 
 IMAGE = "images:debian/12"
 BRIDGE_NAME = "wardenbr0"
@@ -47,7 +56,7 @@ CGNAT_RANGE = ip_network("100.64.0.0/10")
 # it is clear of CG-NAT and of Incus's own default `incusbr0` (10.x on this
 # host). `assert_subnet_sane` below is the structural guard that keeps the
 # next person from "improving" this back into a routed overlay's range.
-BRIDGE_SUBNET = "172.29.0.1/24"
+BRIDGE_SUBNET = os.environ.get(NESTED_BRIDGE_SUBNET_ENV_VAR, "172.29.0.1/24")
 BRIDGE_GATEWAY = BRIDGE_SUBNET.split("/")[0]
 STORAGE_POOL = "wardenpool"
 STORAGE_DRIVER = "btrfs"

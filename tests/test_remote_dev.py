@@ -9,8 +9,9 @@ import pytest
 from tests.fakes import FakeIncusClient, FakeProxyAllowlistController
 from warden.app import WardenApp
 from warden.incus import ExecResult
+from warden.profiles import NESTED_BRIDGE_SUBNET_ENV_VAR
 from warden.remote_dev import DEFAULT_DEV_NAME, NESTED_IMAGE_HOST, RemoteDevError, create_nested_dev
-from warden.vantage import DEFAULT_PROJECT
+from warden.vantage import DEFAULT_PROJECT, NESTED_BRIDGE_SUBNET
 
 VANTAGE_INSTANCE = "warden-vantage"
 
@@ -52,6 +53,9 @@ def test_create_nested_dev_happy_path_verifies_against_nested_incus():
     assert proxy_call_index < dev_call_index
     # the outer allowlist was opened to the nested image host
     assert app.proxy_controller.current == (NESTED_IMAGE_HOST,)
+    # real-host incident: without this env var, the deployed code's own ensure_substrate() would
+    # converge the nested wardenbr0 back to the (colliding) outer default
+    assert client.exec_envs[dev_call_index][NESTED_BRIDGE_SUBNET_ENV_VAR] == NESTED_BRIDGE_SUBNET
 
 
 def test_nested_proxy_config_failure_raises_before_attempting_dev():

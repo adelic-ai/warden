@@ -56,6 +56,7 @@ class FakeIncusClient:
         self.images: dict[str, str] = {}  # alias -> fingerprint (VANTAGE-PLAN.md phase 2)
         self.audit_log: list[AuditEvent] = []
         self.exec_calls: list[tuple[str, list[str]]] = []
+        self.exec_envs: list[dict | None] = []  # parallel to exec_calls, same index
         # substring of the joined argv -> the ExecResult to return. Named `failures` because that
         # was its only use; `exec_results` is the same mechanism under a name that also covers
         # "return this stdout", which `export` needs (a `git log` that prints nothing and a
@@ -197,6 +198,7 @@ class FakeIncusClient:
     ) -> ExecResult:
         inst = self._require_instance(name, project)
         self.exec_calls.append((name, list(argv)))
+        self.exec_envs.append(env)  # parallel list, same index as exec_calls
         if name in self._hung:
             # a hung agent: the bounded exec times out rather than returning (the L2 signal)
             raise IncusTimeoutError(list(argv), timeout or 0.0)

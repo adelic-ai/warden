@@ -11,8 +11,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from warden.profiles import BRIDGE_GATEWAY, PROXY_PORT
-from warden.vantage import DEFAULT_PROJECT
+from warden.profiles import BRIDGE_GATEWAY, NESTED_BRIDGE_SUBNET_ENV_VAR, PROXY_PORT
+from warden.vantage import DEFAULT_PROJECT, NESTED_BRIDGE_SUBNET
 
 if TYPE_CHECKING:
     from warden.app import WardenApp
@@ -96,9 +96,14 @@ def create_nested_dev(
         "python3", "-m", "warden.cli", "dev",
         "--llm", llm, "--name", name, "--mem", mem, "--cpu", cpu, "--no-shell",
     ]
+    # NESTED_BRIDGE_SUBNET travels with this exec too — the deployed warden code's own
+    # ensure_substrate() would otherwise converge the nested wardenbr0 back to profiles.py's
+    # default (the outer subnet), silently re-creating the collision the mold's install already
+    # avoided (phase 5 real-host incident).
     result = client.exec(
         vantage_instance, argv, project=vantage_project,
-        env={"PYTHONPATH": REMOTE_PYTHONPATH}, timeout=timeout,
+        env={"PYTHONPATH": REMOTE_PYTHONPATH, NESTED_BRIDGE_SUBNET_ENV_VAR: NESTED_BRIDGE_SUBNET},
+        timeout=timeout,
     )
     if not result.ok:
         raise RemoteDevError(

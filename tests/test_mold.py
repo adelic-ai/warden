@@ -10,7 +10,8 @@ from tests.fakes import FakeIncusClient, FakeProxyAllowlistController
 from warden.app import WardenApp
 from warden.incus import ExecResult
 from warden.mold import GOLDEN_ALIAS, MOLD_ALLOWLIST, MOLD_INSTANCE_NAME, MoldError, build_vantage_mold
-from warden.vantage import DEFAULT_PROJECT, VantageProjectConflict
+from warden.profiles import NESTED_BRIDGE_SUBNET_ENV_VAR
+from warden.vantage import DEFAULT_PROJECT, NESTED_BRIDGE_SUBNET, VantageProjectConflict
 
 FAKE_SCRIPT = "#!/bin/bash\necho pretending to install incus\n"
 
@@ -32,6 +33,22 @@ def test_build_vantage_mold_happy_path_publishes_and_tears_down():
     assert client.instance_exists(MOLD_INSTANCE_NAME, DEFAULT_PROJECT) is False
     # the install script actually got pushed before being run
     assert MOLD_INSTANCE_NAME in [n for n, _ in client.exec_calls]
+
+
+def test_install_script_gets_the_nested_bridge_subnet_override():
+    # Real-host incident: without this, the nested wardenbr0 reuses the outer bridge's exact
+    # subnet and locally shadows it inside the guest - the install script must get the override,
+    # not the default.
+    client = FakeIncusClient()
+    app = _app(client)
+
+    build_vantage_mold(app, FAKE_SCRIPT)
+
+    install_index = next(
+        i for i, (n, argv) in enumerate(client.exec_calls) if "install-incus-nested.sh" in " ".join(argv)
+    )
+    env = client.exec_envs[install_index]
+    assert env == {NESTED_BRIDGE_SUBNET_ENV_VAR: NESTED_BRIDGE_SUBNET}
 
 
 def test_wires_proxy_env_and_allowlist_before_touching_the_network():

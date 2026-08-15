@@ -17,7 +17,14 @@ from typing import TYPE_CHECKING
 
 from warden.build_vm import IMAGE, build_vm_profile, set_proxy_env
 from warden.flavors import DEBIAN_SETUP
-from warden.vantage import DEFAULT_PROJECT, GOLDEN_ALIAS, refuse_if_foreign, wait_ready
+from warden.profiles import NESTED_BRIDGE_SUBNET_ENV_VAR
+from warden.vantage import (
+    DEFAULT_PROJECT,
+    GOLDEN_ALIAS,
+    NESTED_BRIDGE_SUBNET,
+    refuse_if_foreign,
+    wait_ready,
+)
 
 if TYPE_CHECKING:
     from warden.app import WardenApp
@@ -69,8 +76,10 @@ class MoldResult:
     fingerprint: str
 
 
-def _exec_ok(client, instance: str, project: str, argv: list[str], what: str, timeout: float):
-    result = client.exec(instance, argv, project=project, timeout=timeout)
+def _exec_ok(
+    client, instance: str, project: str, argv: list[str], what: str, timeout: float, env=None
+):
+    result = client.exec(instance, argv, project=project, timeout=timeout, env=env)
     if not result.ok:
         raise MoldError(
             f"{instance}: {what} failed (rc={result.returncode}): "
@@ -133,10 +142,15 @@ def build_vantage_mold(
         f"prereq install ({', '.join(PREREQ_PACKAGES)})", PREREQ_INSTALL_TIMEOUT,
     )
     client.file_push(instance, install_script.encode(), INSTALL_SCRIPT_REMOTE_PATH, project=project)
+    # NESTED_BRIDGE_SUBNET, not the outer profiles.BRIDGE_SUBNET the script defaults to — this is
+    # always the nested case (molding only ever happens for a vantage VM), so no detection needed,
+    # just always pass it. Real-host lesson: reusing the outer subnet here is what let the nested
+    # wardenbr0 locally shadow the outer proxy's address (phase 5 incident).
     _exec_ok(
         client, instance, project,
         ["bash", INSTALL_SCRIPT_REMOTE_PATH],
         "install-incus-nested.sh", INSTALL_TIMEOUT,
+        env={NESTED_BRIDGE_SUBNET_ENV_VAR: NESTED_BRIDGE_SUBNET},
     )
 
     # -- verify before trusting the image: nested Incus actually answers, prereqs actually present.
