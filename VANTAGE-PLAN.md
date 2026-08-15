@@ -197,8 +197,16 @@ it is not something this plan sets up or re-derives.
    but `up()` had actually completed on its own past that client-side bound; a re-run converged in
    16.8s (idempotent), confirming success rather than assuming it from a timeout's own honest
    uncertainty.
-6. **File transfer verbs.** `warden push`/`warden pull` (naming TBD) wrapping `incus file push/pull`,
-   routed through the VM hop — the piece Shape A has zero coverage of.
+6. **File transfer — landed and validated for real.** `warden/transfer.py`, `push_path()`/
+   `pull_path()`. Tar locally, stage through the VM's own filesystem via `file_push`/`file_pull`
+   (proven binary-safe already, `build_vm.py`'s artifact collection), then onto/off the container
+   via `incus exec <vantage> -- incus file push/pull` (file-to-file, not through captured
+   stdout — `exec()`'s stdout capture is not proven binary-safe and nothing here should be the
+   first thing to find that out). 5 tests against `FakeIncusClient` plus real local tar/untar.
+   Real-host run: pushed a directory with a nested subdirectory from the base host into the actual
+   `warden-dev` container, verified byte-for-byte *inside* the container via a direct `incus exec`
+   check (not just trusting the push succeeded), then pulled it back to the base host and confirmed
+   an exact match — a genuine round trip, not just one direction.
 7. **Double-hop shell entry.** Replace `dev`'s single `incus exec` with base-host → VM → container.
 
 Phase 8, decoupled: install `bpftrace` on a vantage VM and close the P5 eBPF validation loop. Can
