@@ -20,12 +20,22 @@ from warden.app import PersistentInstanceError, ProvisioningError, WardenApp
 from warden.privilege import elevate
 from warden.auditd import CaptureNotProvenError, RealAuditRuleInstaller, RealEventSource
 from warden.config import NeedsHumanError, build_config, resolve_llm_auth
+from warden.deploy import DeployError, deploy_code
 from warden.example_prompt import EXAMPLE_PROMPT
 from warden.incus import IncusCommandError, IncusNotFoundError, RealIncusClient
+from warden.mold import MoldError, build_vantage_mold
 from warden.proxy import RealProxyAllowlistController, run_forever
 from warden.recover import SubstrateUnrecovered, diagnose_and_recover, run_with_recovery
+from warden.remote_dev import RemoteDevError, create_nested_dev, enter_nested_shell
 from warden.export import Exporter
 from warden.idmap import derive_idmap
+from warden.vantage import (
+    DEFAULT_NAME as VANTAGE_DEFAULT_NAME,
+    DEFAULT_PROJECT as VANTAGE_DEFAULT_PROJECT,
+    GOLDEN_ALIAS,
+    VantageError,
+    ensure_vantage_vm,
+)
 from warden.report import (
     DEFAULT_EBPF_CAPTURE_SECONDS,
     PROVISIONED_AT_KEY,
@@ -154,6 +164,29 @@ def build_parser() -> argparse.ArgumentParser:
     dev.add_argument("--pool", default=profiles.STORAGE_POOL)
     dev.add_argument("--no-shell", action="store_true",
                      help="just ensure the home is up; do not exec a shell into it")
+    dev.add_argument(
+        "--vantage", action="store_true",
+        help="run the dev home nested inside a persistent vantage VM instead of directly on this "
+             "host (decision B: gives eBPF a kernel above the container to attach to, closing the "
+             "fork-gap blind spot a shared-kernel container has). Requires a golden image already "
+             "published — see `warden vantage-mold`.",
+    )
+    dev.add_argument("--vantage-name", default=VANTAGE_DEFAULT_NAME, help="--vantage only")
+    dev.add_argument("--vantage-project", default=VANTAGE_DEFAULT_PROJECT, help="--vantage only")
+    dev.add_argument("--vantage-mem", default="3GiB", help="--vantage only")
+    dev.add_argument("--vantage-cpu", default="2", help="--vantage only")
+
+    vantage_mold = sub.add_parser(
+        "vantage-mold",
+        help="build (or rebuild) the golden vantage-VM image `dev --vantage` launches from — "
+             "OS + Incus + `admin init` only, no warden/agentwatch (those deploy fresh every "
+             "launch); one-time and slow (~30min), not run automatically by `dev --vantage`",
+    )
+    vantage_mold.add_argument("--vantage-project", default=VANTAGE_DEFAULT_PROJECT)
+    vantage_mold.add_argument("--mem", default="3GiB")
+    vantage_mold.add_argument("--cpu", default="2")
+    vantage_mold.add_argument("--allowlist-file", type=Path, default=DEFAULT_ALLOWLIST_FILE)
+    vantage_mold.add_argument("--pool", default=profiles.STORAGE_POOL)
 
     proxy = sub.add_parser(
         "proxy",
@@ -498,6 +531,8 @@ def _down(args: argparse.Namespace) -> int:
 
 
 def _dev(args: argparse.Namespace) -> int:
+    if args.vantage:
+        return _dev_vantage(args)
     cfg = build_config(
         instance=args.name, flavor="dev", llm=args.llm, host="local",
         project=args.project, mem=args.mem, cpu=args.cpu, extra_allow=args.extra_allow,
@@ -548,6 +583,134 @@ def _dev(args: argparse.Namespace) -> int:
     argv = elevate(["incus", "exec", result.instance, "--project", args.project, "--", "bash", "-l"])
     os.execvp(argv[0], argv)
     return 0  # unreachable — execvp replaces the process
+
+
+def _dev_vantage(args: argparse.Namespace) -> int:
+    """`warden dev --vantage` — VANTAGE-PLAN.md's 7 phases wired end to end: ensure the persistent
+    vantage VM, deploy fresh warden+agentwatch onto it, drive its OWN nested Incus to stand up the
+    dev home, and (unless --no-shell) hand the terminal to a shell inside it, one level down.
+
+    Known gap, not silently papered over: `warden report --live` still talks to the outer Incus
+    directly and cannot see a nested container yet — reconciling a --vantage dev home needs that
+    path taught the double-hop too; not done here.
+    """
+    args.allowlist_file.parent.mkdir(parents=True, exist_ok=True)
+    client = RealIncusClient()
+    app = WardenApp(
+        client,
+        proxy_controller=RealProxyAllowlistController(
+            args.allowlist_file, bind=profiles.BRIDGE_GATEWAY, port=profiles.PROXY_PORT,
+            upstream_proxy=os.environ.get(profiles.UPSTREAM_PROXY_ENV_VAR),
+        ),
+        pool=args.pool,
+    )
+
+    # Refuse to launch a fresh vantage VM from the stock image — it would have no nested Incus at
+    # all, and deploy/create-nested-dev would fail confusingly two steps later instead of here. An
+    # ALREADY-running vantage VM is trusted as-is (it may predate the mold, e.g. built by hand).
+    if not client.instance_exists(
+        args.vantage_name, args.vantage_project
+    ) and not client.image_exists(GOLDEN_ALIAS, project=args.vantage_project):
+        print(
+            f"NEEDS-HUMAN: no {GOLDEN_ALIAS!r} image in project {args.vantage_project!r} yet — "
+            f"build one first (one-time, ~30min): "
+            f"warden vantage-mold --vantage-project {args.vantage_project}",
+            file=sys.stderr,
+        )
+        return 2
+
+    try:
+        vm = run_with_recovery(
+            client, lambda: ensure_vantage_vm(
+                app, name=args.vantage_name, project=args.vantage_project,
+                mem=args.vantage_mem, cpu=args.vantage_cpu,
+            ),
+            instance=args.vantage_name, project=args.vantage_project,
+            log=lambda m: print(m, file=sys.stderr),
+        )
+    except IncusNotFoundError as exc:
+        print(f"NEEDS-HUMAN: {exc}", file=sys.stderr)
+        return 2
+    except SubstrateUnrecovered as exc:
+        print(f"NEEDS-HUMAN: {exc}", file=sys.stderr)
+        return 2
+    except (IncusCommandError, VantageError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(f"dev --vantage: {vm.name} vantage VM up (created={vm.created})", file=sys.stderr)
+
+    try:
+        deployed = deploy_code(app, instance=vm.name, project=vm.project)
+    except DeployError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(
+        f"dev --vantage: deployed warden@{deployed.warden_commit} "
+        f"agentwatch@{deployed.agentwatch_commit}", file=sys.stderr,
+    )
+
+    try:
+        nested = create_nested_dev(
+            app, vantage_instance=vm.name, vantage_project=vm.project,
+            llm=args.llm, name=args.name, mem=args.mem, cpu=args.cpu,
+            nested_project=args.project,
+        )
+    except RemoteDevError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    enter = (
+        f"sudo incus exec {vm.name} --project {vm.project} -- "
+        f"incus exec {nested.name} --project {nested.nested_project} -- bash -l"
+    )
+    if args.no_shell:
+        print(f"dev --vantage: home ready — enter with: {enter}")
+        return 0
+
+    print(
+        f"dev --vantage: entering {nested.name} inside {vm.name} … (exit the shell to return)",
+        file=sys.stderr,
+    )
+    # os.execvp REPLACES warden, same as the direct-container path above — control returns to your
+    # host shell only when you exit the nested shell.
+    enter_nested_shell(
+        vantage_instance=vm.name, container_name=nested.name,
+        vantage_project=vm.project, nested_project=nested.nested_project,
+    )
+    return 0  # unreachable — enter_nested_shell's execvp replaces the process
+
+
+def _vantage_mold(args: argparse.Namespace) -> int:
+    script_path = Path(__file__).resolve().parent.parent / "scripts" / "install-incus-nested.sh"
+    try:
+        install_script = script_path.read_text()
+    except OSError as exc:
+        print(f"error: could not read {script_path}: {exc}", file=sys.stderr)
+        return 1
+
+    args.allowlist_file.parent.mkdir(parents=True, exist_ok=True)
+    client = RealIncusClient()
+    app = WardenApp(
+        client,
+        proxy_controller=RealProxyAllowlistController(
+            args.allowlist_file, bind=profiles.BRIDGE_GATEWAY, port=profiles.PROXY_PORT,
+            upstream_proxy=os.environ.get(profiles.UPSTREAM_PROXY_ENV_VAR),
+        ),
+        pool=args.pool,
+    )
+    try:
+        result = build_vantage_mold(
+            app, install_script, project=args.vantage_project, mem=args.mem, cpu=args.cpu,
+        )
+    except IncusNotFoundError as exc:
+        print(f"NEEDS-HUMAN: {exc}", file=sys.stderr)
+        return 2
+    except (IncusCommandError, VantageError, MoldError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"vantage-mold: published {result.alias} (fingerprint={result.fingerprint})")
+    return 0
 
 
 def _proxy(args: argparse.Namespace) -> int:
@@ -651,6 +814,8 @@ def main(argv: list[str] | None = None) -> int:
         return _down(args)
     if args.command == "dev":
         return _dev(args)
+    if args.command == "vantage-mold":
+        return _vantage_mold(args)
     if args.command == "restore":
         return _restore(args)
     if args.command == "verify":
