@@ -82,16 +82,22 @@ class VantageInfo:
     image: str | None = None
 
 
-def refuse_if_foreign(client, project: str, name: str) -> None:
+def refuse_if_foreign(client, project: str, name: str, *, ignore: tuple[str, ...] = ()) -> None:
+    """`ignore` names siblings this same project is EXPECTED to host by design — the persistent
+    vantage VM and the throwaway mold-build instance legitimately coexist in `DEFAULT_PROJECT`, and
+    without this a mold rebuild would refuse the moment the vantage VM it's meant to feed already
+    exists (real-host bug: the first rebuild attempt after `warden-vantage` went persistent hit
+    exactly this). Only a name genuinely outside both `name` and `ignore` is treated as foreign."""
     if not client.project_exists(project):
         return  # brand new - nothing to collide with
-    others = [n for n in client.list_instances(project) if n != name]
+    known = {name, *ignore}
+    others = [n for n in client.list_instances(project) if n not in known]
     if others:
         raise VantageProjectConflict(
             f"project {project!r} already exists and already hosts instance(s) {others} that "
-            f"aren't {name!r} — refusing to converge its network policy onto them. Pass a project "
-            f"dedicated to warden's own infrastructure (e.g. the default {DEFAULT_PROJECT!r}), or "
-            f"clean up the collision by hand first."
+            f"aren't {name!r} (or a known sibling) — refusing to converge its network policy onto "
+            f"them. Pass a project dedicated to warden's own infrastructure (e.g. the default "
+            f"{DEFAULT_PROJECT!r}), or clean up the collision by hand first."
         )
 
 

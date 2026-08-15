@@ -35,6 +35,25 @@ def test_build_vantage_mold_happy_path_publishes_and_tears_down():
     assert MOLD_INSTANCE_NAME in [n for n, _ in client.exec_calls]
 
 
+def test_build_vantage_mold_coexists_with_an_already_running_persistent_vantage_vm():
+    # Real-host bug: the first rebuild attempt after warden-vantage went persistent refused
+    # outright — refuse_if_foreign saw two instances in the project (the persistent VM + the
+    # throwaway mold-build instance about to be created) and treated warden's own sibling as a
+    # foreign tenant. A rebuild must be possible while the VM it feeds is still running.
+    client = FakeIncusClient()
+    app = _app(client)
+    client.project_create(DEFAULT_PROJECT, {})
+    client.launch(
+        "warden-vantage-golden", "warden-vantage", DEFAULT_PROJECT, "p", instance_type="virtual-machine"
+    )
+
+    result = build_vantage_mold(app, FAKE_SCRIPT)
+
+    assert result.alias == GOLDEN_ALIAS
+    # the persistent VM is untouched throughout
+    assert client.instance_exists("warden-vantage", DEFAULT_PROJECT)
+
+
 def test_install_script_gets_the_nested_bridge_subnet_override():
     # Real-host incident: without this, the nested wardenbr0 reuses the outer bridge's exact
     # subnet and locally shadows it inside the guest - the install script must get the override,

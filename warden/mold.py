@@ -19,6 +19,7 @@ from warden.build_vm import IMAGE, build_vm_profile, set_proxy_env
 from warden.flavors import DEBIAN_SETUP
 from warden.profiles import NESTED_BRIDGE_SUBNET_ENV_VAR
 from warden.vantage import (
+    DEFAULT_NAME,
     DEFAULT_PROJECT,
     GOLDEN_ALIAS,
     NESTED_BRIDGE_SUBNET,
@@ -102,6 +103,7 @@ def build_vantage_mold(
     alias: str = GOLDEN_ALIAS,
     mem: str = "3GiB",
     cpu: str = "2",
+    vantage_name: str = DEFAULT_NAME,
 ) -> MoldResult:
     """Launch a fresh build VM, run `install_script` (the contents of `install-incus-nested.sh`)
     unattended, verify Incus + the prereq packages actually work, publish it as `alias`, then tear
@@ -110,9 +112,14 @@ def build_vantage_mold(
     `install_script` is passed in as text (the caller reads `scripts/install-incus-nested.sh`)
     rather than this module reaching into the filesystem itself — keeps the same seam `up()`'s
     other file-pushing callers already use (`file_push` takes content, never a path).
+
+    `vantage_name` names the persistent vantage VM that legitimately shares `project` with this
+    throwaway build instance — real-host bug, caught on the first rebuild attempt after the vantage
+    VM went persistent: `refuse_if_foreign` saw two instances in the project and refused, treating
+    warden's OWN sibling instance as an unrelated foreign tenant.
     """
     client = app.client
-    refuse_if_foreign(client, project, instance)
+    refuse_if_foreign(client, project, instance, ignore=(vantage_name,))
 
     profile_spec = build_vm_profile(name=PROFILE_NAME, mem=mem, cpu=cpu, pool=app.pool)
     app.ensure_build_vm_substrate(project, profile_spec)
