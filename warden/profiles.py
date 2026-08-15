@@ -34,6 +34,14 @@ from warden.egress import ACL_NAME as EGRESS_ACL_NAME
 #: driving a nested install (mold.py) or a nested `warden dev` (remote_dev.py).
 NESTED_BRIDGE_SUBNET_ENV_VAR = "WARDEN_NESTED_BRIDGE_SUBNET"
 
+#: Override hook for the same shape, one layer further: a proxy running inside a vantage VM
+#: (serving a container inside it) is itself behind the outer proxy on the base host. Without
+#: this, warden/proxy.py's AllowlistProxy tries a direct connection to every target, which the
+#: outer bridge's default-drop ACL blocks — the request hangs until TCP gives up rather than
+#: failing fast (real-host incident, phase 5: 522s before a 502). "host:port" of the parent
+#: proxy to relay through; unset by default, so every non-nested caller is unaffected.
+UPSTREAM_PROXY_ENV_VAR = "WARDEN_UPSTREAM_PROXY"
+
 IMAGE = "images:debian/12"
 BRIDGE_NAME = "wardenbr0"
 

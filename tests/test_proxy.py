@@ -108,3 +108,88 @@ def test_provisioning_to_runtime_narrowing_reloads_without_restart(tmp_path):
     write_allowlist(allowlist, ["github.com"])  # narrow to runtime list
     assert proxy.is_allowed("github.com")
     assert not proxy.is_allowed("deb.debian.org")
+
+
+# --- proxy chaining (VANTAGE-PLAN.md phase 5) --------------------------------------------------
+# A proxy running inside a vantage VM is itself behind the outer proxy. Real-host incident: without
+# this, a nested proxy's direct connection attempt sat for 522s before finally returning a 502 -
+# the outer bridge's default-drop ACL doesn't refuse fast, it just silently drops, and TCP's own
+# retry/timeout behavior is what eventually gave up. These tests stand up two REAL proxy instances
+# (not mocked) locally - an upstream and a downstream configured to relay through it - matching
+# this file's existing "real, unfaked" convention.
+
+
+async def _run_with_chained_proxies(allowlist_path, upstream_allowlist_path, client_fn, *args):
+    upstream = AllowlistProxy(upstream_allowlist_path)
+    upstream_port = await upstream.start()
+    upstream_task = asyncio.create_task(upstream.serve_forever())
+    downstream = AllowlistProxy(allowlist_path, upstream_proxy=f"127.0.0.1:{upstream_port}")
+    downstream_port = await downstream.start()
+    downstream_task = asyncio.create_task(downstream.serve_forever())
+    try:
+        return await asyncio.to_thread(client_fn, downstream_port, *args)
+    finally:
+        for p, t in ((upstream, upstream_task), (downstream, downstream_task)):
+            await p.stop()
+            t.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await t
+
+
+@pytest.mark.network
+def test_chained_proxy_completes_real_tls_through_upstream(tmp_path):
+    allowlist = tmp_path / "allow.txt"
+    write_allowlist(allowlist, [ALLOWED_HOST])
+    upstream_allowlist = tmp_path / "upstream_allow.txt"
+    write_allowlist(upstream_allowlist, [ALLOWED_HOST])  # upstream must ALSO allow it
+    ok = asyncio.run(
+        _run_with_chained_proxies(
+            allowlist, upstream_allowlist, _connect_and_tls_handshake, ALLOWED_HOST
+        )
+    )
+    assert ok is True
+
+
+@pytest.mark.network
+def test_chained_proxy_relays_plain_http_through_upstream(tmp_path):
+    allowlist = tmp_path / "allow.txt"
+    write_allowlist(allowlist, ["deb.debian.org"])
+    upstream_allowlist = tmp_path / "upstream_allow.txt"
+    write_allowlist(upstream_allowlist, ["deb.debian.org"])
+
+    def _plain_http_via_proxy(proxy_port: int) -> bytes:
+        sock = socket.create_connection(("127.0.0.1", proxy_port), timeout=10)
+        sock.sendall(
+            b"GET http://deb.debian.org/debian/dists/bookworm/InRelease HTTP/1.1\r\n"
+            b"Host: deb.debian.org\r\nConnection: close\r\n\r\n"
+        )
+        resp = b""
+        while True:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            resp += chunk
+        sock.close()
+        return resp.split(b"\r\n")[0]
+
+    status = asyncio.run(
+        _run_with_chained_proxies(allowlist, upstream_allowlist, _plain_http_via_proxy)
+    )
+    assert b"200" in status
+
+
+def test_chained_proxy_reports_bad_gateway_when_upstream_refuses(tmp_path):
+    # The downstream allows the host; the upstream does not - the downstream must not hang
+    # waiting on a connection the upstream was always going to refuse, and must not silently
+    # treat the upstream's refusal as its own success.
+    allowlist = tmp_path / "allow.txt"
+    write_allowlist(allowlist, [ALLOWED_HOST])
+    upstream_allowlist = tmp_path / "upstream_allow.txt"
+    write_allowlist(upstream_allowlist, [])  # upstream allows nothing
+
+    status = asyncio.run(
+        _run_with_chained_proxies(
+            allowlist, upstream_allowlist, _connect_and_read_status, ALLOWED_HOST
+        )
+    )
+    assert b"502" in status

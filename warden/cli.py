@@ -163,6 +163,11 @@ def build_parser() -> argparse.ArgumentParser:
     proxy.add_argument("--allowlist-file", type=Path, default=DEFAULT_ALLOWLIST_FILE)
     proxy.add_argument("--bind", default=profiles.BRIDGE_GATEWAY)
     proxy.add_argument("--port", type=int, default=profiles.PROXY_PORT)
+    proxy.add_argument(
+        "--upstream-proxy", default=None, metavar="HOST:PORT",
+        help="relay through a parent proxy instead of connecting to targets directly — needed "
+             "when this proxy itself runs behind another one (container-in-VM shape)",
+    )
 
     restore = sub.add_parser(
         "restore",
@@ -236,7 +241,8 @@ def _up(args: argparse.Namespace) -> int:
         audit_installer=audit_installer,
         event_source_factory=lambda inst: RealEventSource(inst),
         proxy_controller=RealProxyAllowlistController(
-            args.allowlist_file, bind=profiles.BRIDGE_GATEWAY, port=profiles.PROXY_PORT
+            args.allowlist_file, bind=profiles.BRIDGE_GATEWAY, port=profiles.PROXY_PORT,
+            upstream_proxy=os.environ.get(profiles.UPSTREAM_PROXY_ENV_VAR),
         ),
         pool=args.pool,
     )
@@ -299,7 +305,8 @@ def _run(args: argparse.Namespace) -> int:
     runner = WorkloadRunner(
         RealIncusClient(),
         proxy_controller=RealProxyAllowlistController(
-            args.allowlist_file, bind=profiles.BRIDGE_GATEWAY, port=profiles.PROXY_PORT
+            args.allowlist_file, bind=profiles.BRIDGE_GATEWAY, port=profiles.PROXY_PORT,
+            upstream_proxy=os.environ.get(profiles.UPSTREAM_PROXY_ENV_VAR),
         ),
     )
     try:
@@ -501,7 +508,8 @@ def _dev(args: argparse.Namespace) -> int:
         audit_installer=RealAuditRuleInstaller(),
         event_source_factory=lambda inst: RealEventSource(inst),
         proxy_controller=RealProxyAllowlistController(
-            args.allowlist_file, bind=profiles.BRIDGE_GATEWAY, port=profiles.PROXY_PORT
+            args.allowlist_file, bind=profiles.BRIDGE_GATEWAY, port=profiles.PROXY_PORT,
+            upstream_proxy=os.environ.get(profiles.UPSTREAM_PROXY_ENV_VAR),
         ),
         pool=args.pool,
     )
@@ -544,8 +552,9 @@ def _dev(args: argparse.Namespace) -> int:
 
 def _proxy(args: argparse.Namespace) -> int:
     args.allowlist_file.parent.mkdir(parents=True, exist_ok=True)
-    print(f"proxy: serving {args.allowlist_file} on {args.bind}:{args.port}", flush=True)
-    run_forever(args.allowlist_file, args.bind, args.port)
+    suffix = f" via upstream {args.upstream_proxy}" if args.upstream_proxy else ""
+    print(f"proxy: serving {args.allowlist_file} on {args.bind}:{args.port}{suffix}", flush=True)
+    run_forever(args.allowlist_file, args.bind, args.port, upstream_proxy=args.upstream_proxy)
     return 0
 
 

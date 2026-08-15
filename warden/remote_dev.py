@@ -11,7 +11,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from warden.profiles import BRIDGE_GATEWAY, NESTED_BRIDGE_SUBNET_ENV_VAR, PROXY_PORT
+from warden.profiles import (
+    BRIDGE_GATEWAY,
+    NESTED_BRIDGE_SUBNET_ENV_VAR,
+    PROXY_PORT,
+    UPSTREAM_PROXY_ENV_VAR,
+)
 from warden.vantage import DEFAULT_PROJECT, NESTED_BRIDGE_SUBNET
 
 if TYPE_CHECKING:
@@ -30,7 +35,8 @@ REMOTE_PYTHONPATH = "/root/warden:/root/agentwatch"
 #: The nested daemon needs its own server-level proxy config instead (core.proxy_https/proxy_http,
 #: real Incus config keys, confirmed by `incus config get` succeeding rather than erroring).
 NESTED_IMAGE_HOST = "images.linuxcontainers.org"
-OUTER_PROXY_URL = f"http://{BRIDGE_GATEWAY}:{PROXY_PORT}"
+OUTER_PROXY_HOSTPORT = f"{BRIDGE_GATEWAY}:{PROXY_PORT}"
+OUTER_PROXY_URL = f"http://{OUTER_PROXY_HOSTPORT}"
 
 #: Furnishing a fresh dev home is slow and — a known, not-yet-fixed gap (VANTAGE-PLAN.md's
 #: failure-handling section: the progress log isn't wired to the CLI's stdout) — silent while it
@@ -99,10 +105,17 @@ def create_nested_dev(
     # NESTED_BRIDGE_SUBNET travels with this exec too — the deployed warden code's own
     # ensure_substrate() would otherwise converge the nested wardenbr0 back to profiles.py's
     # default (the outer subnet), silently re-creating the collision the mold's install already
-    # avoided (phase 5 real-host incident).
+    # avoided (phase 5 real-host incident #1). UPSTREAM_PROXY does too — without it, the nested
+    # `warden dev`'s own proxy (serving the container it creates) tries direct connections to
+    # every target, which the outer ACL blocks; the request hangs until TCP gives up rather than
+    # failing fast (phase 5 real-host incident #2, confirmed empirically: 522s before a 502).
     result = client.exec(
         vantage_instance, argv, project=vantage_project,
-        env={"PYTHONPATH": REMOTE_PYTHONPATH, NESTED_BRIDGE_SUBNET_ENV_VAR: NESTED_BRIDGE_SUBNET},
+        env={
+            "PYTHONPATH": REMOTE_PYTHONPATH,
+            NESTED_BRIDGE_SUBNET_ENV_VAR: NESTED_BRIDGE_SUBNET,
+            UPSTREAM_PROXY_ENV_VAR: OUTER_PROXY_HOSTPORT,
+        },
         timeout=timeout,
     )
     if not result.ok:

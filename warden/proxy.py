@@ -33,6 +33,13 @@ CONNECT_BAD_GATEWAY = b"HTTP/1.1 502 Bad Gateway\r\n\r\n"
 _CHUNK = 65536
 
 
+class UpstreamRefused(Exception):
+    """The upstream proxy (`AllowlistProxy.upstream_proxy`) declined a CONNECT relay — its own
+    allowlist doesn't cover the target, or it's unreachable. Caller reports CONNECT_BAD_GATEWAY,
+    the same outcome a direct-connect failure produces; the client can't tell which hop failed
+    and doesn't need to."""
+
+
 def write_allowlist(path: Path, domains: list[str]) -> None:
     path.write_text("\n".join(sorted(set(d.lower() for d in domains))) + "\n")
 
@@ -82,10 +89,17 @@ class RealProxyAllowlistController:
     first real run ended up with a carefully-narrowed allowlist that no
     process was reading and egress that was never enforced."""
 
-    def __init__(self, allowlist_path: Path, bind: str = "127.0.0.1", port: int = 3128):
+    def __init__(
+        self,
+        allowlist_path: Path,
+        bind: str = "127.0.0.1",
+        port: int = 3128,
+        upstream_proxy: str | None = None,
+    ):
         self.allowlist_path = Path(allowlist_path)
         self.bind = bind
         self.port = port
+        self.upstream_proxy = upstream_proxy
 
     def set_allowlist(self, domains: tuple[str, ...]) -> None:
         write_allowlist(self.allowlist_path, list(domains))
@@ -96,7 +110,9 @@ class RealProxyAllowlistController:
         if not self.allowlist_path.exists():
             self.allowlist_path.parent.mkdir(parents=True, exist_ok=True)
             write_allowlist(self.allowlist_path, [])
-        return ensure_running(self.allowlist_path, self.bind, self.port)
+        return ensure_running(
+            self.allowlist_path, self.bind, self.port, upstream_proxy=self.upstream_proxy
+        )
 
 
 class AllowlistProxy:
@@ -104,10 +120,27 @@ class AllowlistProxy:
     host matches (exactly, or as a subdomain of) an entry in the allowlist
     file. Never binds < 1024 (no root needed) unless explicitly asked to."""
 
-    def __init__(self, allowlist_path: Path, host: str = "127.0.0.1", port: int = 0):
+    def __init__(
+        self,
+        allowlist_path: Path,
+        host: str = "127.0.0.1",
+        port: int = 0,
+        upstream_proxy: str | None = None,
+    ):
         self.allowlist_path = Path(allowlist_path)
         self.host = host
         self.port = port
+        #: "host:port" of a parent proxy this one relays through, instead of connecting to
+        #: targets directly. Needed the moment warden's own proxy runs nested more than one
+        #: level deep (VANTAGE-PLAN.md phase 5): a proxy running inside a vantage VM, serving a
+        #: container inside it, is itself behind the outer proxy — without this it just tries a
+        #: direct connection, which the outer bridge's default-drop ACL blocks, and the request
+        #: hangs until TCP gives up rather than failing fast. None (the default) is a flat
+        #: single-hop proxy, unchanged from before this existed.
+        self.upstream_proxy: tuple[str, int] | None = None
+        if upstream_proxy is not None:
+            up_host, _, up_port = upstream_proxy.rpartition(":")
+            self.upstream_proxy = (up_host, int(up_port))
         self._allowlist: frozenset[str] = frozenset()
         self._raw: bytes | None = None
         self._server: asyncio.base_events.Server | None = None
@@ -180,8 +213,8 @@ class AllowlistProxy:
             await writer.drain()
             return
         try:
-            remote_reader, remote_writer = await asyncio.open_connection(host, port)
-        except OSError:
+            remote_reader, remote_writer = await self._dial(host, port)
+        except (OSError, UpstreamRefused):
             writer.write(CONNECT_BAD_GATEWAY)
             await writer.drain()
             return
@@ -191,6 +224,29 @@ class AllowlistProxy:
             self._pump(reader, remote_writer),
             self._pump(remote_reader, writer),
         )
+
+    async def _dial(
+        self, host: str, port: int
+    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+        """Connect to `host:port` — directly, or by asking `self.upstream_proxy` to CONNECT
+        there on our behalf when one is configured. Shared by both handlers' CONNECT/tunnel
+        path; `_handle_plain`'s non-CONNECT relay case has its own, simpler upstream branch,
+        since a plain HTTP request needs no handshake before sending it."""
+        if self.upstream_proxy is None:
+            return await asyncio.open_connection(host, port)
+        reader, writer = await asyncio.open_connection(*self.upstream_proxy)
+        target = f"{host}:{port}"
+        writer.write(f"CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n".encode())
+        await writer.drain()
+        status_line = await reader.readline()
+        while True:
+            line = await reader.readline()
+            if line in (b"\r\n", b""):
+                break
+        if b" 200 " not in status_line:
+            writer.close()
+            raise UpstreamRefused(f"upstream refused CONNECT {target}: {status_line!r}")
+        return reader, writer
 
     async def _handle_plain(
         self,
@@ -222,14 +278,22 @@ class AllowlistProxy:
             await writer.drain()
             return
         try:
-            remote_reader, remote_writer = await asyncio.open_connection(host, port)
+            if self.upstream_proxy is None:
+                remote_reader, remote_writer = await asyncio.open_connection(host, port)
+            else:
+                # No CONNECT handshake needed here, unlike _dial's tunnel case — a plain HTTP
+                # request relays to an upstream proxy exactly like it would to the origin,
+                # just sent to a different address.
+                remote_reader, remote_writer = await asyncio.open_connection(*self.upstream_proxy)
         except OSError:
             writer.write(CONNECT_BAD_GATEWAY)
             await writer.drain()
             return
-        # Rewrite absolute-form to origin-form and drop hop-by-hop proxy
-        # headers; everything else is relayed untouched.
-        out = [f"{method} {path} {version}\r\n".encode()]
+        # Rewrite absolute-form to origin-form for a direct connection (what an origin server
+        # expects); an upstream proxy gets the original absolute-form request untouched (what a
+        # proxy expects). Hop-by-hop proxy headers are dropped either way.
+        request_line = f"{method} {target} {version}\r\n" if self.upstream_proxy else f"{method} {path} {version}\r\n"
+        out = [request_line.encode()]
         out += [h for h in headers if not h.lower().startswith(b"proxy-")]
         out.append(b"\r\n")
         remote_writer.write(b"".join(out))
@@ -283,9 +347,11 @@ def is_listening(host: str, port: int, timeout: float = 0.5) -> bool:
         return sock.connect_ex((host, port)) == 0
 
 
-def run_forever(allowlist_path: Path, host: str, port: int) -> None:
+def run_forever(
+    allowlist_path: Path, host: str, port: int, upstream_proxy: str | None = None
+) -> None:
     """Foreground proxy — the body of `warden proxy`."""
-    proxy = AllowlistProxy(allowlist_path, host=host, port=port)
+    proxy = AllowlistProxy(allowlist_path, host=host, port=port, upstream_proxy=upstream_proxy)
 
     async def _main() -> None:
         await proxy.start()
@@ -300,6 +366,7 @@ def ensure_running(
     port: int,
     log_path: Path | None = None,
     timeout: float = 10.0,
+    upstream_proxy: str | None = None,
 ) -> bool:
     """Start a detached proxy if nothing is already listening.
 
@@ -311,13 +378,16 @@ def ensure_running(
     log_path = Path(log_path) if log_path else Path(allowlist_path).parent / "proxy.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     handle = open(log_path, "ab")
+    argv = [
+        sys.executable, "-m", "warden.cli", "proxy",
+        "--allowlist-file", str(allowlist_path),
+        "--bind", host,
+        "--port", str(port),
+    ]
+    if upstream_proxy is not None:
+        argv += ["--upstream-proxy", upstream_proxy]
     subprocess.Popen(
-        [
-            sys.executable, "-m", "warden.cli", "proxy",
-            "--allowlist-file", str(allowlist_path),
-            "--bind", host,
-            "--port", str(port),
-        ],
+        argv,
         stdout=handle,
         stderr=handle,
         stdin=subprocess.DEVNULL,
