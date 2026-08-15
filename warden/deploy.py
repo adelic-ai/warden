@@ -41,7 +41,10 @@ class DeployError(RuntimeError):
 @dataclass(frozen=True)
 class DeployResult:
     warden_commit: str
-    agentwatch_commit: str
+    #: None when deployed with include_agentwatch=False — the capture plane itself (auditd/bpftrace/
+    #: cgroups) is baked into the golden image and needs no code at all; agentwatch is purely a
+    #: consumer of it, only needed by `report`, not by `dev` standing the home up in the first place.
+    agentwatch_commit: Optional[str]
 
 
 def _discover_agentwatch_path() -> Path:
@@ -88,29 +91,39 @@ def deploy_code(
     project: str = DEFAULT_PROJECT,
     warden_path: Optional[Path] = None,
     agentwatch_path: Optional[Path] = None,
+    include_agentwatch: bool = True,
 ) -> DeployResult:
-    """Push fresh warden + agentwatch onto `instance` as `/root/warden` and `/root/agentwatch`
-    siblings — the exact layout `scripts/verify-vantage-vm.py` already expects — then run that
-    script and raise `DeployError` if it reports anything other than all-green. Overwrites whatever
-    was deployed there before (`rm -rf` then clone), matching "fresh every launch," not incremental.
+    """Push fresh warden (+ agentwatch, unless `include_agentwatch=False`) onto `instance` as
+    `/root/warden` and `/root/agentwatch` siblings — the exact layout `scripts/verify-vantage-vm.py`
+    already expects — then run that script and raise `DeployError` if it reports anything other than
+    all-green. Overwrites whatever was deployed there before (`rm -rf` then clone), matching "fresh
+    every launch," not incremental — that includes removing a stale `/root/agentwatch` from an
+    earlier deploy when this call skips it, so the instance's state is never ambiguous about whether
+    agentwatch is actually there.
+
+    `include_agentwatch=False` is for a caller that only wants the persistent home itself standing
+    up — the capture plane (auditd/bpftrace/cgroups) is baked into the golden image and needs no
+    code at all; agentwatch is purely `report`'s dependency, not `dev`'s. A later `report --live
+    --vantage` against an instance deployed this way fails fast with a clear message
+    (`remote_report.py`), not a confusing import error.
     """
     client = app.client
     warden_path = warden_path or Path(__file__).resolve().parent.parent
-    agentwatch_path = agentwatch_path or _discover_agentwatch_path()
 
     warden_bundle, warden_commit = _bundle_head(warden_path)
-    agentwatch_bundle, agentwatch_commit = _bundle_head(agentwatch_path)
-
     client.file_push(instance, warden_bundle, WARDEN_BUNDLE_REMOTE, project=project)
-    client.file_push(instance, agentwatch_bundle, AGENTWATCH_BUNDLE_REMOTE, project=project)
+
+    agentwatch_commit: Optional[str] = None
+    clone_cmd = "cd /root && rm -rf warden agentwatch"
+    clone_cmd += f" && git clone -q {WARDEN_BUNDLE_REMOTE} warden"
+    if include_agentwatch:
+        agentwatch_path = agentwatch_path or _discover_agentwatch_path()
+        agentwatch_bundle, agentwatch_commit = _bundle_head(agentwatch_path)
+        client.file_push(instance, agentwatch_bundle, AGENTWATCH_BUNDLE_REMOTE, project=project)
+        clone_cmd += f" && git clone -q {AGENTWATCH_BUNDLE_REMOTE} agentwatch"
 
     clone_result = client.exec(
-        instance,
-        ["sh", "-c",
-         f"cd /root && rm -rf warden agentwatch && "
-         f"git clone -q {WARDEN_BUNDLE_REMOTE} warden && "
-         f"git clone -q {AGENTWATCH_BUNDLE_REMOTE} agentwatch"],
-        project=project, timeout=CLONE_TIMEOUT,
+        instance, ["sh", "-c", clone_cmd], project=project, timeout=CLONE_TIMEOUT,
     )
     if not clone_result.ok:
         raise DeployError(
@@ -121,9 +134,10 @@ def deploy_code(
     client.file_push(
         instance, VERIFY_SCRIPT_LOCAL.read_bytes(), VERIFY_SCRIPT_REMOTE, project=project
     )
-    verify_result = client.exec(
-        instance, ["python3", VERIFY_SCRIPT_REMOTE], project=project, timeout=VERIFY_TIMEOUT
-    )
+    verify_argv = ["python3", VERIFY_SCRIPT_REMOTE]
+    if not include_agentwatch:
+        verify_argv.append("--no-agentwatch")
+    verify_result = client.exec(instance, verify_argv, project=project, timeout=VERIFY_TIMEOUT)
     if not verify_result.ok:
         raise DeployError(
             f"{instance}: post-deploy verification failed:\n{verify_result.stdout}{verify_result.stderr}"

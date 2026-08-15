@@ -23,12 +23,21 @@ if TYPE_CHECKING:
 
 REMOTE_PYTHONPATH = "/root/warden:/root/agentwatch"
 REMOTE_OUT_ROOT = "/root/.warden/runs"
+#: deploy_code's own layout — a clone of the agentwatch repo lands its package one level down.
+AGENTWATCH_MARKER = "/root/agentwatch/agentwatch/run.py"
 
 #: The auditd path (collector + ausearch) is normally fast; generous headroom for a contended host.
 REPORT_TIMEOUT = 120.0
 #: --ebpf additionally blocks for the capture window itself (report.py's DEFAULT_EBPF_CAPTURE_SECONDS
 #: is 30s) plus reconcile overhead — bounded, not unbounded, but needs more room than the plain path.
 EBPF_REPORT_TIMEOUT = 300.0
+
+
+class RemoteReportError(RuntimeError):
+    """The remote `report --live` was never going to succeed for a reason knowable BEFORE spending
+    the round trip — right now, exactly one case: `dev --vantage --no-agentwatch` was used to stand
+    the home up, so there is no agentwatch on the VM to reconcile with. Checked locally rather than
+    left to surface as the remote command's own (base-host-flavored, misleading here) import error."""
 
 
 @dataclass(frozen=True)
@@ -68,8 +77,22 @@ def report_nested_live(
     `report`'s own exit code (0 / 1 / 2) is relayed verbatim, not reinterpreted — it already carries
     an honest verdict (§7's bar applies here unchanged); this wrapper's only job is getting that
     verdict, its stdout, and its artifacts across the extra hop.
+
+    Raises `RemoteReportError` immediately, before the round trip, if agentwatch was never deployed
+    here (`dev --vantage --no-agentwatch`) — the remote command would fail anyway, but with an
+    import error written for a base-host operator, not "redeploy with agentwatch included."
     """
     client = app.client
+    marker = client.exec(
+        vantage_instance, ["test", "-f", AGENTWATCH_MARKER], project=vantage_project, timeout=15.0,
+    )
+    if not marker.ok:
+        raise RemoteReportError(
+            f"{vantage_instance}: no agentwatch deployed here — this dev home was stood up with "
+            f"--no-agentwatch, or predates it. Re-run `dev --vantage` WITHOUT --no-agentwatch to "
+            f"redeploy with agentwatch included before reconciling."
+        )
+
     argv = [
         "python3", "-m", "warden.cli", "report", "--live",
         "--llm", llm, "--instance", container_name, "--project", nested_project,

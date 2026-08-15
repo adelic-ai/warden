@@ -25,18 +25,23 @@ def main() -> int:
     except ImportError as exc:
         checks.append((f"warden importable ({exc})", False))
 
-    try:
-        import agentwatch.groundtruth.ebpf_capture as ebpf_capture
-        from agentwatch.reconciler import runtime_scope as rs
+    # --no-agentwatch: deploy_code() can skip agentwatch entirely (dev --vantage --no-agentwatch —
+    # the capture plane itself, auditd/bpftrace/cgroups, is baked into the golden image and doesn't
+    # need it; only `report`'s reconciliation does). An absent agentwatch is then expected, not a
+    # failure — this flag is what tells this script the difference.
+    if "--no-agentwatch" not in sys.argv:
+        try:
+            import agentwatch.groundtruth.ebpf_capture as ebpf_capture
+            from agentwatch.reconciler import runtime_scope as rs
 
-        checks.append(("agentwatch importable", True))
-        checks.append(("run_capture present", hasattr(ebpf_capture, "run_capture")))
-        checks.append((
-            "claude-basename detection present",
-            "claude" in rs.DEFAULT_RUNTIME_BASENAMES,
-        ))
-    except ImportError as exc:
-        checks.append((f"agentwatch importable ({exc})", False))
+            checks.append(("agentwatch importable", True))
+            checks.append(("run_capture present", hasattr(ebpf_capture, "run_capture")))
+            checks.append((
+                "claude-basename detection present",
+                "claude" in rs.DEFAULT_RUNTIME_BASENAMES,
+            ))
+        except ImportError as exc:
+            checks.append((f"agentwatch importable ({exc})", False))
 
     ok = True
     for label, passed in checks:

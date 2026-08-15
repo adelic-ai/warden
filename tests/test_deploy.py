@@ -61,6 +61,29 @@ def test_deploy_code_happy_path_pushes_bundles_clones_and_verifies():
     assert len(clone_calls) == 1
 
 
+def test_deploy_code_include_agentwatch_false_skips_it_entirely():
+    client = FakeIncusClient()
+    app = _app(client)
+    instance = _launched(client)
+
+    result = deploy_code(
+        app, instance=instance, warden_path=THIS_REPO, include_agentwatch=False,
+    )
+
+    assert result.warden_commit
+    assert result.agentwatch_commit is None
+    inst = client.instances[(DEFAULT_PROJECT, instance)]
+    assert AGENTWATCH_BUNDLE_REMOTE not in inst.files
+    clone_calls = [argv for n, argv in client.exec_calls if n == instance and "git clone" in " ".join(argv)]
+    assert len(clone_calls) == 1
+    joined = " ".join(clone_calls[0])
+    assert joined.count("git clone") == 1  # only warden's, not a second one for agentwatch
+    assert "rm -rf warden agentwatch" in joined  # still cleans up any stale agentwatch from before
+    # the verify script gets told not to expect agentwatch
+    verify_calls = [argv for n, argv in client.exec_calls if "verify-vantage-vm.py" in " ".join(argv)]
+    assert "--no-agentwatch" in verify_calls[0]
+
+
 @requires_agentwatch_checkout
 def test_clone_failure_raises_deploy_error():
     client = FakeIncusClient()

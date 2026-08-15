@@ -27,7 +27,7 @@ from warden.mold import MoldError, build_vantage_mold
 from warden.proxy import RealProxyAllowlistController, run_forever
 from warden.recover import SubstrateUnrecovered, diagnose_and_recover, run_with_recovery
 from warden.remote_dev import RemoteDevError, create_nested_dev, enter_nested_shell
-from warden.remote_report import report_nested_live
+from warden.remote_report import RemoteReportError, report_nested_live
 from warden.export import Exporter
 from warden.idmap import derive_idmap
 from warden.vantage import (
@@ -173,6 +173,14 @@ def build_parser() -> argparse.ArgumentParser:
     dev.add_argument("--pool", default=profiles.STORAGE_POOL)
     dev.add_argument("--no-shell", action="store_true",
                      help="just ensure the home is up; do not exec a shell into it")
+    dev.add_argument(
+        "--no-agentwatch", action="store_true",
+        help="--vantage only: skip deploying agentwatch — the capture plane (auditd/bpftrace/"
+             "cgroups) is baked into the golden image and needs no code; only `report`'s "
+             "reconciliation needs agentwatch, not `dev` standing the home up. A later "
+             "`report --live --vantage` against a home built this way refuses until redeployed "
+             "without this flag.",
+    )
     dev.add_argument(
         "--vantage", action="store_true",
         help="run the dev home nested inside a persistent vantage VM instead of directly on this "
@@ -430,6 +438,9 @@ def _report_vantage(args: argparse.Namespace) -> int:
     except IncusNotFoundError as exc:
         print(f"NEEDS-HUMAN: {exc}", file=sys.stderr)
         return 2
+    except RemoteReportError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     except IncusCommandError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -699,14 +710,17 @@ def _dev_vantage(args: argparse.Namespace) -> int:
     print(f"dev --vantage: {vm.name} vantage VM up (created={vm.created})", file=sys.stderr)
 
     try:
-        deployed = deploy_code(app, instance=vm.name, project=vm.project)
+        deployed = deploy_code(
+            app, instance=vm.name, project=vm.project, include_agentwatch=not args.no_agentwatch,
+        )
     except DeployError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    print(
-        f"dev --vantage: deployed warden@{deployed.warden_commit} "
-        f"agentwatch@{deployed.agentwatch_commit}", file=sys.stderr,
+    agentwatch_note = (
+        f"agentwatch@{deployed.agentwatch_commit}" if deployed.agentwatch_commit
+        else "agentwatch SKIPPED (--no-agentwatch — report --live --vantage will refuse until redeployed)"
     )
+    print(f"dev --vantage: deployed warden@{deployed.warden_commit} {agentwatch_note}", file=sys.stderr)
 
     try:
         nested = create_nested_dev(

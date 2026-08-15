@@ -13,7 +13,7 @@ import pytest
 from tests.fakes import FakeIncusClient, FakeProxyAllowlistController
 from warden.app import WardenApp
 from warden.incus import ExecResult
-from warden.remote_report import REMOTE_OUT_ROOT, report_nested_live
+from warden.remote_report import REMOTE_OUT_ROOT, RemoteReportError, report_nested_live
 from warden.transfer import VM_STAGING_PATH
 from warden.vantage import DEFAULT_PROJECT
 
@@ -127,3 +127,21 @@ def test_report_nested_live_records_pull_failure_without_raising(tmp_path):
     assert result.returncode == 0
     assert not result.artifacts_pulled
     assert result.pull_error is not None
+
+
+def test_report_nested_live_refuses_before_the_round_trip_when_agentwatch_was_never_deployed(tmp_path):
+    # dev --vantage --no-agentwatch home: no /root/agentwatch marker on the VM at all.
+    client = FakeIncusClient()
+    app = _app(client)
+    _launched_vantage(client)
+    client.exec_failures["test -f /root/agentwatch/agentwatch/run.py"] = ExecResult(1, "", "")
+
+    with pytest.raises(RemoteReportError, match="no agentwatch deployed"):
+        report_nested_live(
+            app, vantage_instance=VANTAGE_INSTANCE, container_name=CONTAINER, llm="claude",
+            local_out_dir=tmp_path / "out",
+        )
+
+    # never even attempted the remote report command
+    report_calls = [argv for n, argv in client.exec_calls if "warden.cli report" in " ".join(argv)]
+    assert report_calls == []
