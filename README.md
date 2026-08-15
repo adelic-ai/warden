@@ -19,10 +19,10 @@ agent workloads. A friend suggested Incus, and the project moved from raw VMs to
 Black Hat 2026, I sat in on [Caging the Agent: How Roblox Built Multi-Layer Sandboxes to Secure
 Claude Code at Enterprise
 Scale](https://blackhat.com/us-26/briefings/schedule/?#caging-the-agent-how-roblox-built-multi-layer-sandboxes-to-secure-claude-code-at-enterprise-scale-53708),
-talked with the speakers afterward, super cool dudes, and that conversation is what got me thinking about nesting the
-container inside its own VM instead of running it directly on the host — giving an eBPF probe a
-kernel of its own to watch from, instead of sharing the host's. That's decision B, and it's the
-reason this repo has `warden dev --vantage`.
+talked with the speakers afterward, super cool dudes, and that conversation got me thinking — I
+landed on nesting the container inside its own VM instead of running it directly on the host,
+giving an eBPF probe a kernel of its own to watch from, instead of sharing the host's. That's
+decision B, and it's the reason this repo has `warden dev --vantage`.
 
 ## Two shapes, one substrate
 
