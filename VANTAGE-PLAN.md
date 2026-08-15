@@ -172,8 +172,31 @@ it is not something this plan sets up or re-derives.
    `agentwatch@12a689d`, and a direct re-run of `verify-vantage-vm.py` confirmed all four checks
    green, including the one just fixed. 5 tests (real `git bundle` against this repo + the sibling
    agentwatch checkout, Incus-side wiring against `FakeIncusClient`).
-5. **Remote-drive container creation.** Invoke step 8's `warden dev`-equivalent over `incus exec`
-   from the base host. No container-side code changes expected — this already worked as-is.
+5. **Remote-drive container creation — landed and validated for real.** `warden/remote_dev.py`,
+   `create_nested_dev()`. Invokes step 8's `warden dev`-equivalent over `incus exec` from the base
+   host. Container-side code needed zero changes, as expected — but getting *to* the container
+   surfaced the deepest real-host finding of this whole plan: `warden/proxy.py`'s `AllowlistProxy`
+   had no concept of an upstream proxy, so a proxy running inside the vantage VM (serving the
+   container it creates) tried direct connections to every target, which the outer bridge's
+   default-drop ACL blocked — confirmed empirically at 522s before a 502, not a fast refusal.
+   Fixed with real proxy chaining (`_dial()`, a shared CONNECT-tunnel-through-upstream helper;
+   `_handle_plain` relays absolute-form to the upstream instead of rewriting to origin-form),
+   threaded through `run_forever`/`ensure_running`/`RealProxyAllowlistController`, a new
+   `warden proxy --upstream-proxy` flag, and `profiles.UPSTREAM_PROXY_ENV_VAR`
+   (`WARDEN_UPSTREAM_PROXY`) — unset by default, every non-nested caller unaffected. A second,
+   smaller fix followed once chaining actually worked: the outer proxy's allowlist needs the
+   *container's* provisioning hosts too, not just the VM's own image-fetch host — fixed by reusing
+   `flavors.resolve(Flavor.DEV, llm).provisioning_allowlist` rather than a second hand-maintained
+   list. 4 tests in `test_remote_dev.py`, plus 3 new tests in `test_proxy.py` that stand up two
+   *real* chained `AllowlistProxy` instances and prove real TLS to `github.com` and real HTTP to
+   `deb.debian.org` both relay correctly through two hops.
+
+   Real-host run: `warden-dev` created inside the vantage VM's own nested Incus, snapshot taken
+   (`up()`'s own clean-snapshot step, proof of a genuinely completed provisioning, not a partial
+   one), verified against the nested Incus directly. The first attempt hit `DEV_TIMEOUT` (300s) —
+   but `up()` had actually completed on its own past that client-side bound; a re-run converged in
+   16.8s (idempotent), confirming success rather than assuming it from a timeout's own honest
+   uncertainty.
 6. **File transfer verbs.** `warden push`/`warden pull` (naming TBD) wrapping `incus file push/pull`,
    routed through the VM hop — the piece Shape A has zero coverage of.
 7. **Double-hop shell entry.** Replace `dev`'s single `incus exec` with base-host → VM → container.
