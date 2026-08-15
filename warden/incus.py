@@ -185,6 +185,14 @@ class RealIncusClient:
         try:
             return subprocess.run(
                 argv, capture_output=True, input=input_bytes,
+                # DEVNULL when there's no input to feed: without it, a caller whose OWN stdin is a
+                # pipe (piped provisioning output, an automated harness, `warden dev --vantage`'s own
+                # exec()-heavy pipeline ahead of the final interactive handoff) leaks that stdin into
+                # every `incus exec` call in between — real bug, caught validating the double-hop
+                # shell entry: earlier exec()s in the same pipeline silently drained bytes meant for
+                # the shell at the end, an ordering-dependent, easy-to-miss failure mode. None of the
+                # non-interactive exec()s here read stdin on purpose, so there is nothing to inherit.
+                stdin=subprocess.DEVNULL if input_bytes is None else None,
                 text=input_bytes is None, timeout=timeout,
             )
         except FileNotFoundError:
@@ -369,7 +377,9 @@ class RealIncusClient:
             raise IncusNotFoundError(self._bin)
         argv = elevate([self._bin, "file", "pull", f"{name}/{remote_path}", "-", "--project", project])
         try:
-            proc = subprocess.run(argv, capture_output=True, timeout=LIFECYCLE_TIMEOUT)
+            proc = subprocess.run(
+                argv, capture_output=True, stdin=subprocess.DEVNULL, timeout=LIFECYCLE_TIMEOUT
+            )
         except FileNotFoundError:
             raise IncusNotFoundError(self._bin) from None
         except subprocess.TimeoutExpired:
