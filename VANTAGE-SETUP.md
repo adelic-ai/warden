@@ -111,7 +111,50 @@ not seconds; every call after that is fast (idempotent reuse).
 `--no-shell` for scripted/unattended use. `warden dev` (no `--vantage`) is a completely separate,
 simpler home — direct on the base host, no nesting; the two are not interchangeable state.
 
-## 7. Reconcile
+**`--no-agentwatch`** skips deploying agentwatch onto the VM — see §7 below for exactly what you
+get and don't get by doing this. `warden report --live --vantage` against a home built this way
+refuses immediately, before even attempting to reconcile, until you redeploy without the flag.
+
+## 7. What the image gives you, independent of agentwatch (or any reconciler at all)
+
+**This describes what `mold.py`'s current `PREREQ_PACKAGES` bakes in by default, not a fixed
+property of "the image" as a concept.** The golden image only ever contains what you build into it
+— add or drop a package there and this section changes with it. If you customize the mold, this is
+your prompt to also update this doc, not a promise warden is making on your behalf.
+
+The golden image's job (as currently built) is producing an unforgeable capture plane; reading and
+reconciling it is a separate concern (`report.py`'s own principle: *"warden produces and exports;
+consumers analyse"*). This section is for anyone who wants the raw ground truth without agentwatch
+— either to bring their own tooling, or just to understand what's actually there by default.
+
+**The auditd plane — fully warden's own, reusable by anything.** `warden/auditd.py` installs and
+prunes a rule keyed `warden-<instance>`, scoped to the container's *derived* unprivileged host uid
+range (`derive_idmap()` — re-derived fresh every time, never trusted from a cached value; an idmap
+reallocation, e.g. from a restore, changes this). The raw record format is the standard
+`auditctl`/`ausearch` audit log — `ausearch -k warden-<instance>` (as root, or via
+`scripts/warden-collect-audit.sh`, the same scoped root collector `report` itself uses) gets you the
+same records `report --live --vantage` reconciles, with no agentwatch involved at all.
+
+**The eBPF plane — the *capability* is warden's; the *probe* is not.** `bpftrace` is installed and
+runnable as the vantage VM's own root (`incus exec <vantage> -- bpftrace ...`, no sudoers grant
+needed — see §3). That's the raw capability: a kernel with BTF, a working bpftrace, invocable
+without prompting. The actual probe *program* — what it traces, how it identifies which processes
+belong to which agent session (cgroup-based scoping) — is agentwatch's own code
+(`agentwatch/groundtruth/ebpf_capture.py`), not baked into the image or into warden. Bringing your
+own reconciler for this plane means bringing your own bpftrace program too; warden hands you the
+privilege and the container identity (`agent_uid`, the instance), not a ready-made script.
+
+**cgroups — not warden's doing at all.** `cgroup2` with the standard controllers is just what a
+modern Linux kernel has by default; nothing in the mold specifically adds it. It's there because
+the base Debian image has it, same as it would be anywhere else.
+
+One precision worth being clear about: this is "bring your own tooling that reads the same raw
+planes," not "plug your own reconciler into `warden report`." The `report` command itself calls
+agentwatch's `run_once` directly — there's no pluggable interface to swap it out. A different
+reconciler means separate tooling, run separately, reading `ausearch -k warden-<instance>` and/or
+your own bpftrace capture yourself.
+
+## 8. Reconcile (with agentwatch)
 
 ```
 python3 -m warden.cli report --live --vantage --llm claude          # auditd plane
@@ -119,7 +162,9 @@ python3 -m warden.cli report --live --vantage --llm claude --ebpf   # decision B
 ```
 Both remote-drive the ordinary `report --live` command *inside* the vantage VM (the plane being
 reconciled is a property of that VM's own kernel, not the base host's — there's nothing to read from
-the base host's side at all) and pull the resulting artifacts back to this host.
+the base host's side at all) and pull the resulting artifacts back to this host. Both require
+agentwatch actually deployed (§6) — `report` needs it on every path, direct or vantage, auditd or
+eBPF; there is no agentwatch-free mode of `report` itself, only of standing the home up.
 
 ## Sanity checklist before you file a bug
 
