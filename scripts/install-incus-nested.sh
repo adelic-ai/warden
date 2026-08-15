@@ -45,46 +45,54 @@ EOF
   # btrfs-progs explicitly — the storage pool driver needs it and it's not
   # pulled in by the incus package alone on a minimal image.
   #
+  # nftables explicitly — `incus admin init` needs `nft` on PATH to set up the managed bridge's
+  # firewall rules ("Failed clearing nftables rules for network ...: exec: nft: executable file not
+  # found"). pop-os's own base image happens to already have it; Lima's template:debian-12 does not
+  # — found running this same script there for the first time. Installing it explicitly, rather than
+  # assuming the base image provides it, is what makes this script actually portable across
+  # different base images instead of accidentally depending on one host's particular starting point.
+  #
   # --no-install-recommends: without it, incus's Recommends chain pulls a full mesa/LLVM/QEMU-SPICE
   # graphics+audio stack (libllvm15, mesa-vulkan-drivers, libgl1-mesa-dri, pocketsphinx-en-us,
   # libflite1, libmfx1 — measured on a real build: ~260MB) that a headless vantage VM, driven
   # entirely over `incus exec`/the API with no display ever attached, has no use for. If a future
   # `incus launch --vm` from inside the nested Incus needs QEMU's graphical console after all, this
   # is the line to revisit — nothing here currently exercises that path.
-  apt-get install -y --no-install-recommends incus incus-client btrfs-progs
+  apt-get install -y --no-install-recommends incus incus-client btrfs-progs nftables
 else
   echo "== incus already installed, skipping package step =="
 fi
 
+# Three independently-idempotent steps, not one preseed block gated by a single check. Real bug
+# this replaced: `incus admin init --preseed` creates the storage pool AND the network together,
+# but the old code used "does the pool exist" as a proxy for "did the whole block succeed" — a
+# partial failure (pool created, network creation failed, e.g. on a host missing `nft`) left the
+# pool existing and the network missing, and every re-run after that saw "pool exists" and skipped
+# the network entirely, forever. Found running this script against a fresh Lima VM whose base image
+# lacked nftables — but the bug itself is general script logic, not Lima-specific; pop-os just never
+# happened to hit the partial-failure precondition that exposes it.
+#
 # Producer fully into a var, then grep a here-string — never `producer | grep -q` under
 # `set -o pipefail`: grep -q exits at the first match and SIGPIPEs the producer, which pipefail
 # then reports as 141, a false negative *caused by the match* (see DECISIONS D18). Harmless here
-# only because the pool list is tiny; written safely so a larger producer can't reintroduce it.
+# only because the lists are tiny; written safely so a larger producer can't reintroduce it.
 existing_pools="$(incus storage list --format csv 2>/dev/null | cut -d, -f1)"
 if grep -qx "${STORAGE_POOL}" <<<"${existing_pools}"; then
-  echo "== storage pool ${STORAGE_POOL} already exists, skipping admin init =="
+  echo "== storage pool ${STORAGE_POOL} already exists =="
 else
-  echo "== incus admin init: throwaway btrfs pool + pinned bridge =="
+  echo "== creating storage pool ${STORAGE_POOL} (throwaway btrfs, loop-backed) =="
   # Loop-backed btrfs via `size` — incus manages the image under its own storage-pools dir. A manual
   # `source:` image under /var/lib/incus is rejected by incus >= 7.x ("Only allowed source path ...").
-  incus admin init --preseed <<PRESEED
-storage_pools:
-- name: ${STORAGE_POOL}
-  driver: btrfs
-  config:
-    size: ${POOL_SIZE}
-networks:
-- name: ${BRIDGE}
-  type: bridge
-  config:
-    ipv4.address: ${BRIDGE_SUBNET}
-    ipv4.nat: "true"
-    ipv6.address: none
-profiles:
-- name: default
-  config: {}
-  devices: {}
-PRESEED
+  incus storage create "${STORAGE_POOL}" btrfs size="${POOL_SIZE}"
+fi
+
+existing_networks="$(incus network list --format csv 2>/dev/null | cut -d, -f1)"
+if grep -qx "${BRIDGE}" <<<"${existing_networks}"; then
+  echo "== bridge ${BRIDGE} already exists =="
+else
+  echo "== creating bridge ${BRIDGE} (${BRIDGE_SUBNET}) =="
+  incus network create "${BRIDGE}" \
+    ipv4.address="${BRIDGE_SUBNET}" ipv4.nat=true ipv6.address=none
 fi
 
 echo "== verifying =="
