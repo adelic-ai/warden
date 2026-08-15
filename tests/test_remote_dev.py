@@ -10,6 +10,7 @@ from tests.fakes import FakeIncusClient, FakeProxyAllowlistController
 from warden.app import WardenApp
 from warden.incus import ExecResult
 from warden.profiles import NESTED_BRIDGE_SUBNET_ENV_VAR
+from warden.flavors import Flavor, resolve as resolve_flavor
 from warden.remote_dev import DEFAULT_DEV_NAME, NESTED_IMAGE_HOST, RemoteDevError, create_nested_dev
 from warden.vantage import DEFAULT_PROJECT, NESTED_BRIDGE_SUBNET
 
@@ -51,8 +52,12 @@ def test_create_nested_dev_happy_path_verifies_against_nested_incus():
     proxy_call_index = client.exec_calls.index((VANTAGE_INSTANCE, proxy_calls[0]))
     dev_call_index = client.exec_calls.index((VANTAGE_INSTANCE, dev_calls[0]))
     assert proxy_call_index < dev_call_index
-    # the outer allowlist was opened to the nested image host
-    assert app.proxy_controller.current == (NESTED_IMAGE_HOST,)
+    # the outer allowlist was opened to the nested image host PLUS whatever the container's own
+    # provisioning needs — reused from flavors.resolve, not a second hand-maintained list (real-
+    # host lesson: narrowing this to just the image host produced a fast 403 once proxy chaining
+    # started actually reaching this far).
+    expected = (NESTED_IMAGE_HOST, *resolve_flavor(Flavor.DEV, "claude").provisioning_allowlist)
+    assert app.proxy_controller.current == expected
     # real-host incident: without this env var, the deployed code's own ensure_substrate() would
     # converge the nested wardenbr0 back to the (colliding) outer default
     assert client.exec_envs[dev_call_index][NESTED_BRIDGE_SUBNET_ENV_VAR] == NESTED_BRIDGE_SUBNET

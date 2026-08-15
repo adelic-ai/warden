@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from warden.flavors import Flavor, resolve as resolve_flavor
 from warden.profiles import (
     BRIDGE_GATEWAY,
     NESTED_BRIDGE_SUBNET_ENV_VAR,
@@ -79,13 +80,20 @@ def create_nested_dev(
 
     Before that: points the vantage VM's own nested incusd at the outer proxy (server-level config,
     not per-exec environment — see `OUTER_PROXY_URL`'s docstring) and opens the outer proxy's
-    allowlist to `NESTED_IMAGE_HOST`, replacing whatever was there (the mold's apt-era entries are
-    no longer relevant by the time this runs — a later call, a different purpose, same
-    provisioning-vs-runtime narrowing discipline `submit_build` already uses elsewhere).
+    allowlist to `NESTED_IMAGE_HOST` plus `Flavor.DEV`'s own provisioning allowlist for `llm`,
+    replacing whatever was there (the mold's apt-era entries are no longer relevant by the time
+    this runs). Real-host lesson: with proxy chaining now working (`warden/proxy.py`), the
+    container's own provisioning traffic (apt, npm, the LLM CLI install) flows through this same
+    outer proxy too, not just the VM's own image fetch — narrowing this to just
+    `NESTED_IMAGE_HOST` produced a fast, correct 403 the moment chaining started actually
+    reaching this far. Reusing `flavors.resolve`'s own computation rather than a second,
+    hand-maintained list that could drift from what the deployed container-provisioning code
+    itself uses.
     """
     client = app.client
     if app.proxy_controller is not None:
-        app.proxy_controller.set_allowlist((NESTED_IMAGE_HOST,))
+        container_allowlist = resolve_flavor(Flavor.DEV, llm).provisioning_allowlist
+        app.proxy_controller.set_allowlist((NESTED_IMAGE_HOST, *container_allowlist))
     proxy_cfg = client.exec(
         vantage_instance,
         ["incus", "config", "set",
