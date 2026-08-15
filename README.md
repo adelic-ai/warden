@@ -93,6 +93,12 @@ python3 -m warden.cli restore <instance> --flavor monitored --llm gemini --audit
 python3 -m warden.cli down <instance>
 ```
 
+**Want the container running inside a dedicated VM instead, with a kernel-level eBPF plane above
+it (decision B) rather than the auditd-only plane above?** That's `warden dev --vantage` /
+`warden report --live --vantage [--ebpf]` — a different setup path with a real hardware
+requirement (nested virtualization, which most VPS providers don't expose). See
+[`VANTAGE-SETUP.md`](VANTAGE-SETUP.md).
+
 ### What `warden report` will and won't tell you
 
 It separates **authorized** / **CONFIRMED** / **NONE** / **GAP** and segments provisioning from
