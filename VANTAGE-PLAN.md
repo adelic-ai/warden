@@ -181,6 +181,14 @@ it is not something this plan sets up or re-derives.
 Phase 8, decoupled: install `bpftrace` on a vantage VM and close the P5 eBPF validation loop. Can
 happen against `warden-mon` today, independent of phases 1–7.
 
+**Known gap surfaced late: `build_vantage_mold()` can't rebuild incrementally.** It always launches
+fresh from the stock `IMAGE`, never from the current golden alias — so adding one missing prereq
+(`auditd`, discovered when phase 5 actually exercised `up()`'s audit-pruning path — install-incus-
+nested.sh installs Incus but nothing else `up()` needs) meant redoing the entire ~25-minute Incus
+install + `admin init` cycle for a change that's a few seconds of actual work. The cheap fix — launch
+from `GOLDEN_ALIAS` when it already exists, install just the new thing, republish — isn't built.
+Worth adding before the next prereq gets discovered the same way.
+
 ## Failure handling — reuse what warden already has, don't reinvent it per layer
 
 `warden/recover.py` and `warden/workload.py` already solved two of this plan's four new failure
