@@ -207,7 +207,22 @@ it is not something this plan sets up or re-derives.
    `warden-dev` container, verified byte-for-byte *inside* the container via a direct `incus exec`
    check (not just trusting the push succeeded), then pulled it back to the base host and confirmed
    an exact match — a genuine round trip, not just one direction.
-7. **Double-hop shell entry.** Replace `dev`'s single `incus exec` with base-host → VM → container.
+7. **Double-hop shell entry — landed and validated for real.** `warden/remote_dev.py`,
+   `enter_nested_shell()`. `incus exec` nests exactly the way every non-interactive call this plan
+   already makes does — the only difference is the innermost command is an interactive login shell
+   instead of a canned one, and the outer call inherits the real terminal via `os.execvp` (matching
+   `cli.py`'s existing single-hop `dev` entry) instead of having output captured. 2 tests confirm
+   the double-hop argv construction. Real-host validation used the same `_execvp` test seam with a
+   non-replacing runner (an actual live terminal isn't available to an automated session) piping
+   `whoami; pwd; cat /etc/hostname` through the real double-hop command: returned `root`, `/root`,
+   and `warden-dev` — the container's own hostname, proving the commands genuinely executed inside
+   the nested container, not just that the outer `incus exec` succeeded.
+
+**All 7 phases now landed and real-host validated.** VANTAGE-PLAN.md's original goal — `warden dev`
+standing up the full container-in-VM shape and landing you in a shell inside it, ergonomically,
+starting from nothing — is proven end to end, piece by piece, against pop-os. Not yet done: wiring
+these seven standalone functions into the actual `warden dev` CLI command as its default behavior
+(everything here has been driven directly as a Python API, real but not yet the thing a user types).
 
 Phase 8, decoupled: install `bpftrace` on a vantage VM and close the P5 eBPF validation loop. Can
 happen against `warden-mon` today, independent of phases 1–7.
