@@ -33,11 +33,16 @@ TIER_HUNG_INSTANCE = "hung_instance"
 TIER_DAEMON_WEDGED = "daemon_wedged"
 
 # Surfaced verbatim for L3. Kept honest: names the privilege warden lacks and the exact command,
-# and notes instances survive — the operator who does not know that reboots a LUKS box and strands it.
+# and warns against rebooting instead — an operator who does not know instances survive a daemon
+# restart might reboot the whole host, which risks stranding it on any box that needs a manual step
+# to come back up (disk decryption, a console session that isn't there). Host-agnostic on purpose:
+# no hardcoded hostname/user — warden doesn't know how *this* operator reaches *this* host (local
+# shell, SSH, something else), so it names the command, not a way to run it.
 DAEMON_RECOVERY_HINT = (
     "incus daemon is wedged — warden cannot restart it (needs root it does not have). "
-    "Run:  ssh -t srh@pop-os 'sudo systemctl restart incus'   "
-    "(running instances survive a daemon restart; do NOT reboot — the box is LUKS-encrypted)."
+    "As a user with sudo on this host, run: sudo systemctl restart incus "
+    "(running instances survive a daemon restart — do NOT reboot instead; a reboot risks any "
+    "manual step this host needs to come back up that this session cannot perform)."
 )
 
 
