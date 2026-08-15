@@ -218,14 +218,37 @@ it is not something this plan sets up or re-derives.
    and `warden-dev` — the container's own hostname, proving the commands genuinely executed inside
    the nested container, not just that the outer `incus exec` succeeded.
 
-**All 7 phases now landed and real-host validated.** VANTAGE-PLAN.md's original goal — `warden dev`
-standing up the full container-in-VM shape and landing you in a shell inside it, ergonomically,
-starting from nothing — is proven end to end, piece by piece, against pop-os. Not yet done: wiring
-these seven standalone functions into the actual `warden dev` CLI command as its default behavior
-(everything here has been driven directly as a Python API, real but not yet the thing a user types).
+**All 7 phases now landed and real-host validated, AND wired into the actual CLI.** VANTAGE-PLAN.md's
+original goal — `warden dev` standing up the full container-in-VM shape and landing you in a shell
+inside it, ergonomically, starting from nothing — is proven end to end against pop-os, and is now
+what a user types: `warden dev --vantage`, `warden report --live --vantage [--ebpf]`, and
+`warden vantage-mold` (`warden/cli.py`), no longer just a Python API driven from ad hoc scripts.
 
-Phase 8, decoupled: install `bpftrace` on a vantage VM and close the P5 eBPF validation loop. Can
-happen against `warden-mon` today, independent of phases 1–7.
+**Phase 8 — landed.** `bpftrace` is baked into `mold.py`'s `PREREQ_PACKAGES`, with its dependency
+chain (`libllvm14`/`libclang-cpp14`/`libclang1-14`/`libbpfcc`, ~200MB — not a trivial add) and a
+real-probe-attach dependency check, not just `--version`. Confirmed working on two independent
+architectures: pop-os (x86_64, KVM) and a Lima VM on Apple Silicon (arm64, Apple's `vz`) — same
+package, same clean install, same real probe attach on both, ruling out "got lucky on pop-os's
+specific setup." The golden image was rebuilt (`install-incus-nested.sh` also gained
+`--no-install-recommends`, dropping ~260MB of unused mesa/LLVM/audio bloat incus's Recommends chain
+pulled in — net size change: 1259.36MiB → 1021.60MiB, fingerprint `7648f1bb469f...`), `warden-vantage`
+was safely relaunched from it (old instance preserved, renamed aside rather than deleted, per a
+NASA-style pre-flight: verify the new image boots and passes every check on a THROWAWAY instance
+before ever touching the instance in use), and a full nested `warden-dev` container was provisioned
+on the fresh VM afterward — `git`, `claude` CLI installed, clean snapshot taken, matching the exact
+same real-host validation bar every other phase in this doc was held to.
+
+**Real bug found and fixed along the way: `refuse_if_foreign` treated warden's own sibling instance
+as foreign.** The persistent vantage VM and the throwaway mold-build instance are BOTH meant to
+coexist in `DEFAULT_PROJECT` — but the guard just checked "is there any other instance here at all,"
+so the first rebuild attempt after `warden-vantage` went persistent refused outright, mistaking
+warden's own infrastructure for an unrelated tenant. Fixed with an `ignore` parameter naming the
+known sibling; regression test in `test_mold.py`.
+
+**Second real bug, operational not code: image `--alias` doesn't reassign.** `incus publish` refuses
+outright if the target alias already points to a different image — republishing over an existing
+golden image needs the old alias explicitly deleted first (never the old image's bytes, until the
+new one is proven). Not yet automated in `mold.py`; done by hand this time.
 
 **Known gap surfaced late: `build_vantage_mold()` can't rebuild incrementally.** It always launches
 fresh from the stock `IMAGE`, never from the current golden alias — so adding one missing prereq
