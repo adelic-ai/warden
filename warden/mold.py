@@ -34,9 +34,12 @@ PROFILE_NAME = "warden-vantage-mold-vm"
 INSTALL_SCRIPT_REMOTE_PATH = "/root/install-incus-nested.sh"
 
 #: apt prereqs baked into the mold: curl (install-incus-nested.sh needs it for the zabbly repo, per
-#: Shape A step 3) and git (stable OS tooling phase 4's code deploy needs every launch — baking it
-#: in once here means phase 4 never re-installs it).
-PREREQ_PACKAGES = ("curl", "ca-certificates", "git")
+#: Shape A step 3), git (stable OS tooling phase 4's code deploy needs every launch), and auditd
+#: (auditctl/ausearch — real-host lesson, phase 5: warden's own up() unconditionally prunes stale
+#: audit rules on every call, auditd.py shells out to auditctl directly, and that's not part of
+#: install-incus-nested.sh's own installs). Baking these in once here means phase 4/5 never
+#: re-install them.
+PREREQ_PACKAGES = ("curl", "ca-certificates", "git", "auditd")
 
 #: The bridge ACL default-drops direct egress (same as every container/VM warden manages) — a VM
 #: reaches nothing until its traffic is routed through warden's own proxy AND that proxy's allowlist
