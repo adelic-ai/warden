@@ -42,6 +42,21 @@ def test_ensure_vantage_vm_creates_when_absent():
     assert info.image == IMAGE
 
 
+def test_ensure_vantage_vm_sets_proxy_env_on_create():
+    # Real-host gap: this used to be set only for the throwaway mold-build instance, never for the
+    # persistent vantage VM itself — a freshly created one had no route to reach anything via a bare
+    # apt-get run on its own shell. Set at create, same as everything else this function does once.
+    client = FakeIncusClient()
+    app = _app(client)
+
+    ensure_vantage_vm(app)
+
+    inst = client.instances[(DEFAULT_PROJECT, DEFAULT_NAME)]
+    assert inst.config["environment.http_proxy"] == inst.config["environment.https_proxy"]
+    assert inst.config["environment.https_proxy"].startswith("http://")
+    assert "environment.no_proxy" in inst.config
+
+
 def test_ensure_vantage_vm_uses_golden_alias_when_the_mold_has_produced_one():
     # Phase 3: once mold.py has published an image, every subsequent launch should use it
     # automatically - no caller-supplied flag, no code change at the call site.

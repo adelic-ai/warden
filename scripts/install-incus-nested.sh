@@ -44,7 +44,14 @@ EOF
   apt-get update
   # btrfs-progs explicitly — the storage pool driver needs it and it's not
   # pulled in by the incus package alone on a minimal image.
-  apt-get install -y incus incus-client btrfs-progs
+  #
+  # --no-install-recommends: without it, incus's Recommends chain pulls a full mesa/LLVM/QEMU-SPICE
+  # graphics+audio stack (libllvm15, mesa-vulkan-drivers, libgl1-mesa-dri, pocketsphinx-en-us,
+  # libflite1, libmfx1 — measured on a real build: ~260MB) that a headless vantage VM, driven
+  # entirely over `incus exec`/the API with no display ever attached, has no use for. If a future
+  # `incus launch --vm` from inside the nested Incus needs QEMU's graphical console after all, this
+  # is the line to revisit — nothing here currently exercises that path.
+  apt-get install -y --no-install-recommends incus incus-client btrfs-progs
 else
   echo "== incus already installed, skipping package step =="
 fi

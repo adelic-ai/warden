@@ -34,12 +34,14 @@ PROFILE_NAME = "warden-vantage-mold-vm"
 INSTALL_SCRIPT_REMOTE_PATH = "/root/install-incus-nested.sh"
 
 #: apt prereqs baked into the mold: curl (install-incus-nested.sh needs it for the zabbly repo, per
-#: Shape A step 3), git (stable OS tooling phase 4's code deploy needs every launch), and auditd
+#: Shape A step 3), git (stable OS tooling phase 4's code deploy needs every launch), auditd
 #: (auditctl/ausearch — real-host lesson, phase 5: warden's own up() unconditionally prunes stale
 #: audit rules on every call, auditd.py shells out to auditctl directly, and that's not part of
-#: install-incus-nested.sh's own installs). Baking these in once here means phase 4/5 never
-#: re-install them.
-PREREQ_PACKAGES = ("curl", "ca-certificates", "git", "auditd")
+#: install-incus-nested.sh's own installs), and bpftrace (Phase 8: decision B's live eBPF plane —
+#: confirmed real on pop-os to need no kernel-headers, BTF is present in the stock kernel, but it
+#: pulls a full llvm-14/clang toolchain + libbpfcc, ~200MB, not a trivial add). Baking these in once
+#: here means later phases never re-install them.
+PREREQ_PACKAGES = ("curl", "ca-certificates", "git", "auditd", "bpftrace")
 
 #: The bridge ACL default-drops direct egress (same as every container/VM warden manages) — a VM
 #: reaches nothing until its traffic is routed through warden's own proxy AND that proxy's allowlist
@@ -157,10 +159,14 @@ def build_vantage_mold(
     )
 
     # -- verify before trusting the image: nested Incus actually answers, prereqs actually present.
+    # `bpftrace --version` alone would pass even if the BPF/BTF plumbing under it were broken; real
+    # loading is confirmed by actually attaching a probe, the same proof a live report run needs.
     _exec_ok(
         client, instance, project,
-        ["sh", "-c", "incus version && python3 --version && git --version"],
-        "dependency check (incus/python3/git)", DEP_CHECK_TIMEOUT,
+        ["sh", "-c",
+         "incus version && python3 --version && git --version && bpftrace --version && "
+         "bpftrace -e 'BEGIN { exit(); }'"],
+        "dependency check (incus/python3/git/bpftrace)", DEP_CHECK_TIMEOUT,
     )
 
     client.stop(instance, project=project)

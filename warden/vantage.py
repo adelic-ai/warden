@@ -21,7 +21,7 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from warden.build_vm import IMAGE, build_vm_profile
+from warden.build_vm import IMAGE, build_vm_profile, set_proxy_env
 from warden.incus import IncusCommandError
 
 if TYPE_CHECKING:
@@ -137,4 +137,11 @@ def ensure_vantage_vm(
     image = GOLDEN_ALIAS if client.image_exists(GOLDEN_ALIAS, project=project) else IMAGE
     client.launch(image, name, project, profile_spec.name, instance_type="virtual-machine")
     wait_ready(client, name, project)
+    # Real-host gap, found live: `build_vm.set_proxy_env` was only ever called for the THROWAWAY
+    # mold-build instance (mold.py), never for the PERSISTENT vantage VM itself — so a fresh vantage
+    # VM had no route to the internet at all beyond what the nested-Incus-specific `core.proxy_https`
+    # config (remote_dev.py) covers, and any ad hoc `apt-get` run directly on the VM's own shell
+    # failed with "Network is unreachable". Set once, at create, same as everything else in this
+    # function — a persistent instance's `environment.*` config survives across every later call.
+    set_proxy_env(client, name, project)
     return VantageInfo(name=name, project=project, created=True, image=image)
