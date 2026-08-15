@@ -107,6 +107,39 @@ def push_path(
     return TransferResult(remote_path=remote_path, tar_bytes=len(tar_bytes))
 
 
+def pull_from_vm(
+    app: "WardenApp",
+    *,
+    vantage_instance: str,
+    remote_path: str,
+    local_path: Path,
+    vantage_project: str = DEFAULT_PROJECT,
+) -> TransferResult:
+    """The base-host<->VM half of `pull_path`, alone — for artifacts that already live on the
+    vantage VM's own filesystem rather than inside a nested container. `report_nested_live`
+    (`warden/remote_report.py`) is the caller: it remote-drives `warden report --live` *inside* the
+    vantage VM, against the VM's own local nested Incus, and that inner invocation writes its
+    output (report.json etc.) to the VM's own disk — never into the container being reported on.
+    """
+    client = app.client
+    local_path = Path(local_path)
+
+    _exec_ok(
+        client, vantage_instance, vantage_project,
+        ["tar", "cf", VM_STAGING_PATH, "-C", remote_path, "."],
+        "tar the vantage VM's directory",
+    )
+    tar_bytes = client.file_pull(vantage_instance, VM_STAGING_PATH, project=vantage_project)
+
+    local_path.mkdir(parents=True, exist_ok=True)
+    extract_kwargs = {"filter": "data"} if hasattr(tarfile, "data_filter") else {}
+    with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r") as tar:
+        tar.extractall(local_path, **extract_kwargs)
+
+    client.exec(vantage_instance, ["rm", "-f", VM_STAGING_PATH], project=vantage_project, timeout=EXEC_TIMEOUT)
+    return TransferResult(remote_path=remote_path, tar_bytes=len(tar_bytes))
+
+
 def pull_path(
     app: "WardenApp",
     *,

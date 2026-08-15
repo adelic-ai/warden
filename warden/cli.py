@@ -27,6 +27,7 @@ from warden.mold import MoldError, build_vantage_mold
 from warden.proxy import RealProxyAllowlistController, run_forever
 from warden.recover import SubstrateUnrecovered, diagnose_and_recover, run_with_recovery
 from warden.remote_dev import RemoteDevError, create_nested_dev, enter_nested_shell
+from warden.remote_report import report_nested_live
 from warden.export import Exporter
 from warden.idmap import derive_idmap
 from warden.vantage import (
@@ -133,6 +134,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--capture-seconds", type=int, default=DEFAULT_EBPF_CAPTURE_SECONDS, dest="capture_seconds",
         help=f"eBPF live-capture window in seconds (default {DEFAULT_EBPF_CAPTURE_SECONDS}; --ebpf only)",
     )
+    report.add_argument(
+        "--vantage", action="store_true",
+        help="reconcile a `dev --vantage` home: the auditd/eBPF plane belongs to the vantage VM's "
+             "OWN kernel, not this host's, so this remote-drives `report --live` inside the VM "
+             "(against its own nested Incus) and pulls the artifacts back. Requires --live.",
+    )
+    report.add_argument("--vantage-name", default=VANTAGE_DEFAULT_NAME, help="--vantage only")
+    report.add_argument("--vantage-project", default=VANTAGE_DEFAULT_PROJECT, help="--vantage only")
 
     export = sub.add_parser("export", help="tar everything out: copy all, nothing summarised")
     export.add_argument("dest", type=Path, help="directory to write the tarball into")
@@ -402,9 +411,50 @@ def _resolve_live_since(client, cfg, since_arg: Optional[str]) -> float:
     )
 
 
+def _report_vantage(args: argparse.Namespace) -> int:
+    """`warden report --live --vantage` — remote-drives the ordinary `report --live` command inside
+    the vantage VM (see `remote_report.py`'s module docstring for why: the plane it reconciles is a
+    property of that VM's kernel, not this host's) and pulls the artifacts back."""
+    instance = args.instance or "warden-dev"
+    client = RealIncusClient()
+    app = WardenApp(client)
+    out = run_dir_for(args.out, args.project, instance)
+
+    try:
+        result = report_nested_live(
+            app, vantage_instance=args.vantage_name, vantage_project=args.vantage_project,
+            container_name=instance, nested_project=args.project, llm=args.llm,
+            local_out_dir=out, since=args.since, ebpf=getattr(args, "ebpf", False),
+            capture_seconds=getattr(args, "capture_seconds", None), host=args.host,
+        )
+    except IncusNotFoundError as exc:
+        print(f"NEEDS-HUMAN: {exc}", file=sys.stderr)
+        return 2
+    except IncusCommandError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    if result.stdout:
+        print(result.stdout)
+    if result.stderr:
+        print(result.stderr, file=sys.stderr)
+    if result.artifacts_pulled:
+        # The remote stdout above already printed its OWN "artifacts: ..." line — that path is on
+        # the vantage VM's disk, not reachable from here. Labeled so the two don't read as the same
+        # claim printed twice.
+        print(f"\nartifacts (pulled to this host): {out}")
+    else:
+        # Not swallowed: the remote command's own stdout/stderr above already carries its honest
+        # failure — this just says out loud that nothing was fetched, rather than silently leaving
+        # a stale or absent local directory that looks the same as "ran clean, wrote nothing".
+        print(f"\nartifacts: NOT pulled ({result.pull_error})", file=sys.stderr)
+    return result.returncode
+
+
 def _report(args: argparse.Namespace) -> int:
     live = getattr(args, "live", False)
     use_ebpf = getattr(args, "ebpf", False)
+    vantage = getattr(args, "vantage", False)
     if use_ebpf and not live:
         print(
             "error: --ebpf is live-only (its ring buffer is ephemeral, unlike the auditd log). "
@@ -412,6 +462,15 @@ def _report(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
+    if vantage and not live:
+        print(
+            "error: --vantage reconciles a `dev --vantage` home, which only exists as a live "
+            "(persistent, manifest-free) instance. Use `warden report --live --vantage`.",
+            file=sys.stderr,
+        )
+        return 1
+    if vantage:
+        return _report_vantage(args)
     flavor = "dev" if live else args.flavor
     instance = args.instance or f"warden-{flavor}"
     cfg = build_config(
