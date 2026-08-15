@@ -8,10 +8,12 @@ only adds the remote-invocation wrapper Shape A did by hand over SSH.
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import Callable, TYPE_CHECKING
 
 from warden.flavors import Flavor, resolve as resolve_flavor
+from warden.privilege import elevate
 from warden.profiles import (
     BRIDGE_GATEWAY,
     NESTED_BRIDGE_SUBNET_ENV_VAR,
@@ -146,3 +148,32 @@ def create_nested_dev(
         )
 
     return RemoteDevResult(name=name, nested_project=nested_project)
+
+
+def enter_nested_shell(
+    *,
+    vantage_instance: str,
+    container_name: str,
+    vantage_project: str = DEFAULT_PROJECT,
+    nested_project: str = "warden",
+    shell_argv: tuple[str, ...] = ("bash", "-l"),
+    _execvp: Callable[[str, list[str]], None] = os.execvp,
+) -> None:
+    """VANTAGE-PLAN.md phase 7 — the actual "boom, you're in" step: hand the operator's terminal to
+    an interactive shell *inside the container*, through the vantage VM. `incus exec` nests exactly
+    the way every non-interactive call this plan already makes does (`incus exec <vantage> --
+    incus exec <container> -- <cmd>`) — the only difference here is the innermost command is an
+    interactive login shell instead of a canned one, and the outer call inherits the real terminal
+    instead of having its output captured.
+
+    `os.execvp` REPLACES the calling process, exactly like `cli.py`'s existing single-hop `dev`
+    entry — you ARE in the container until you exit, then control returns to your host shell.
+    `_execvp` is a test/validation seam: swap in a non-replacing runner to prove the double-hop
+    argv actually reaches a working shell without ending the calling process.
+    """
+    argv = elevate([
+        "incus", "exec", vantage_instance, "--project", vantage_project, "--",
+        "incus", "exec", container_name, "--project", nested_project, "--",
+        *shell_argv,
+    ])
+    _execvp(argv[0], argv)

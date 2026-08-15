@@ -11,7 +11,13 @@ from warden.app import WardenApp
 from warden.incus import ExecResult
 from warden.profiles import NESTED_BRIDGE_SUBNET_ENV_VAR
 from warden.flavors import Flavor, resolve as resolve_flavor
-from warden.remote_dev import DEFAULT_DEV_NAME, NESTED_IMAGE_HOST, RemoteDevError, create_nested_dev
+from warden.remote_dev import (
+    DEFAULT_DEV_NAME,
+    NESTED_IMAGE_HOST,
+    RemoteDevError,
+    create_nested_dev,
+    enter_nested_shell,
+)
 from warden.vantage import DEFAULT_PROJECT, NESTED_BRIDGE_SUBNET
 
 VANTAGE_INSTANCE = "warden-vantage"
@@ -96,3 +102,35 @@ def test_zero_exit_but_no_container_is_not_trusted():
 
     with pytest.raises(RemoteDevError, match="not trusting the exit code alone"):
         create_nested_dev(app, vantage_instance=VANTAGE_INSTANCE, llm="claude")
+
+
+# --- phase 7: double-hop shell entry ------------------------------------------------------------
+
+
+def test_enter_nested_shell_builds_the_double_hop_argv():
+    calls = []
+    enter_nested_shell(
+        vantage_instance=VANTAGE_INSTANCE, container_name="warden-dev",
+        _execvp=lambda prog, argv: calls.append((prog, argv)),
+    )
+
+    assert len(calls) == 1
+    prog, argv = calls[0]
+    assert prog == "sudo"
+    assert argv == [
+        "sudo", "-n",
+        "incus", "exec", VANTAGE_INSTANCE, "--project", DEFAULT_PROJECT, "--",
+        "incus", "exec", "warden-dev", "--project", "warden", "--",
+        "bash", "-l",
+    ]
+
+
+def test_enter_nested_shell_respects_custom_shell_argv():
+    calls = []
+    enter_nested_shell(
+        vantage_instance=VANTAGE_INSTANCE, container_name="warden-dev",
+        shell_argv=("sh",),
+        _execvp=lambda prog, argv: calls.append((prog, argv)),
+    )
+
+    assert calls[0][1][-1:] == ["sh"]
