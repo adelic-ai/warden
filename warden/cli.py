@@ -24,6 +24,7 @@ from warden.deploy import DeployError, deploy_code
 from warden.example_prompt import EXAMPLE_PROMPT
 from warden.incus import IncusCommandError, IncusNotFoundError, RealIncusClient
 from warden.lima import DEFAULT_NAME as LIMA_DEFAULT_NAME
+from warden.lima_auditd import LimaAuditRuleInstaller, LimaEventSource
 from warden.lima_client import LimaIncusClient
 from warden.mold import MoldError, build_vantage_mold
 from warden.proxy import LimaProxyAllowlistController, RealProxyAllowlistController, run_forever
@@ -322,6 +323,22 @@ def _build_proxy_controller(args: argparse.Namespace):
     )
 
 
+def _build_audit_installer(args: argparse.Namespace):
+    """auditd itself runs inside the Lima VM, not on the Mac — same shape as the proxy and the
+    Incus client, a third component `--lima` has to redirect. `LimaAuditRuleInstaller` reuses the
+    same rule-generation logic as `RealAuditRuleInstaller` (the module-level functions), only the
+    subprocess/file-I/O plumbing differs."""
+    if getattr(args, "lima", False):
+        return LimaAuditRuleInstaller(args.lima_name)
+    return RealAuditRuleInstaller()
+
+
+def _build_event_source_factory(args: argparse.Namespace):
+    if getattr(args, "lima", False):
+        return lambda inst: LimaEventSource(args.lima_name, inst)
+    return lambda inst: RealEventSource(inst)
+
+
 def _up(args: argparse.Namespace) -> int:
     instance = args.name or f"warden-{args.flavor}"
     cfg = build_config(
@@ -346,11 +363,11 @@ def _up(args: argparse.Namespace) -> int:
 
     args.allowlist_file.parent.mkdir(parents=True, exist_ok=True)
     client = _build_client(args)
-    audit_installer = RealAuditRuleInstaller()
+    audit_installer = _build_audit_installer(args)
     app = WardenApp(
         client,
         audit_installer=audit_installer,
-        event_source_factory=lambda inst: RealEventSource(inst),
+        event_source_factory=_build_event_source_factory(args),
         proxy_controller=_build_proxy_controller(args),
         pool=args.pool,
     )
@@ -554,7 +571,7 @@ def _report(args: argparse.Namespace) -> int:
 
     reporter = Reporter(
         _build_client(args),
-        event_source_factory=lambda inst: RealEventSource(inst),
+        event_source_factory=_build_event_source_factory(args),
     )
     try:
         if use_ebpf:
@@ -649,7 +666,7 @@ def _down(args: argparse.Namespace) -> int:
     # The audit installer is wired here too: `down` must take the
     # instance's audit rule with it, or the next instance to be allocated
     # that uid range gets captured under a dead instance's key.
-    app = WardenApp(client, audit_installer=RealAuditRuleInstaller())
+    app = WardenApp(client, audit_installer=_build_audit_installer(args))
     try:
         removed = app.down(args.instance, args.project, force=args.force)
     except IncusNotFoundError as exc:
@@ -680,8 +697,8 @@ def _dev(args: argparse.Namespace) -> int:
     args.allowlist_file.parent.mkdir(parents=True, exist_ok=True)
     app = WardenApp(
         _build_client(args),
-        audit_installer=RealAuditRuleInstaller(),
-        event_source_factory=lambda inst: RealEventSource(inst),
+        audit_installer=_build_audit_installer(args),
+        event_source_factory=_build_event_source_factory(args),
         proxy_controller=_build_proxy_controller(args),
         pool=args.pool,
     )
@@ -869,8 +886,8 @@ def _restore(args: argparse.Namespace) -> int:
     client = _build_client(args)
     app = WardenApp(
         client,
-        audit_installer=RealAuditRuleInstaller(),
-        event_source_factory=lambda inst: RealEventSource(inst),
+        audit_installer=_build_audit_installer(args),
+        event_source_factory=_build_event_source_factory(args),
     )
     try:
         event = app.restore_and_reprove(cfg, snapshot=args.snapshot)
@@ -897,8 +914,8 @@ def _verify(args: argparse.Namespace) -> int:
     )
     app = WardenApp(
         _build_client(args),
-        audit_installer=RealAuditRuleInstaller(),
-        event_source_factory=lambda inst: RealEventSource(inst),
+        audit_installer=_build_audit_installer(args),
+        event_source_factory=_build_event_source_factory(args),
         # verify only reads/probes; no allowlist file is written, so no proxy controller is needed.
     )
     try:
