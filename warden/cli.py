@@ -24,7 +24,7 @@ from warden.deploy import DeployError, deploy_code
 from warden.example_prompt import EXAMPLE_PROMPT
 from warden.incus import IncusCommandError, IncusNotFoundError, RealIncusClient
 from warden.lima import DEFAULT_NAME as LIMA_DEFAULT_NAME
-from warden.lima_auditd import LimaAuditRuleInstaller, LimaEventSource
+from warden.lima_auditd import LimaAuditCollector, LimaAuditRuleInstaller, LimaEventSource
 from warden.lima_client import LimaIncusClient
 from warden.mold import MoldError, build_vantage_mold
 from warden.proxy import LimaProxyAllowlistController, RealProxyAllowlistController, run_forever
@@ -339,6 +339,15 @@ def _build_event_source_factory(args: argparse.Namespace):
     return lambda inst: RealEventSource(inst)
 
 
+def _build_audit_collector(args: argparse.Namespace):
+    """DESIGN §4's privileged collector — a fourth component in the same shape as the proxy/auditd
+    rule installer: it shells out with local `sudo -n` by default, which fails on `--lima` since
+    auditd (and the collector script's own privilege) both belong to the VM, not the Mac."""
+    if getattr(args, "lima", False):
+        return LimaAuditCollector(args.lima_name)
+    return None  # Reporter's own default (a real, local AuditCollector)
+
+
 def _up(args: argparse.Namespace) -> int:
     instance = args.name or f"warden-{args.flavor}"
     cfg = build_config(
@@ -571,6 +580,7 @@ def _report(args: argparse.Namespace) -> int:
 
     reporter = Reporter(
         _build_client(args),
+        collector=_build_audit_collector(args),
         event_source_factory=_build_event_source_factory(args),
     )
     try:

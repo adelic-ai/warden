@@ -30,6 +30,7 @@ from warden.auditd import (
 )
 from warden.lima import LIMACTL_BIN
 from warden.privilege import SUDO
+from warden.report import COLLECTOR, ReportError
 
 if TYPE_CHECKING:
     from warden.idmap import IdRange
@@ -174,3 +175,58 @@ class LimaEventSource:
         if proc.returncode == 0 and proc.stdout.strip():
             return parse_events(proc.stdout)
         return []
+
+
+class LimaAuditCollector:
+    """Same job as `report.AuditCollector` (DESIGN §4's privileged half — a tiny root collector that
+    copies one instance's audit records to a file the unprivileged reconciler can read), but the
+    collector script has to run *inside* the Lima VM, since that's where auditd/the audit log
+    actually live.
+
+    `script` is the SAME path on both sides — Lima's default `$HOME` mount makes
+    `scripts/warden-collect-audit.sh` visible inside the guest already, same reasoning as
+    `LimaProxyAllowlistController`'s allowlist file. But that mount is read-only from the guest, so
+    the collector can't write its *output* there directly — it stages to a guest-local path first,
+    then `limactl copy` pulls the result back to `out_path` on the Mac. The script's own `chown
+    $owner` is harmless-but-irrelevant here: `limactl copy` re-materializes the file under whichever
+    account ran the copy, on this side, regardless of what it was chowned to inside the guest.
+    """
+
+    STAGING_PATH = "/tmp/warden-audit-collect.raw"
+
+    def __init__(self, vm_name: str, script: Path = COLLECTOR):
+        self.vm_name = vm_name
+        self.script = Path(script)
+
+    def collect(self, rule_key: str, out_path: Path, owner_uid: int) -> Path:
+        out_path = Path(out_path)
+        argv = [
+            LIMACTL_BIN, "shell", self.vm_name, "--", *SUDO,
+            str(self.script), rule_key, self.STAGING_PATH, str(owner_uid),
+        ]
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=120)
+        if proc.returncode != 0:
+            raise ReportError(
+                f"audit collector failed inside {self.vm_name} (rc={proc.returncode}): "
+                f"{proc.stderr.strip()}\n"
+                f"  argv: {' '.join(argv)}\n"
+                "  This is the privileged half of the split (DESIGN §4) and it needs root inside "
+                "the VM. Grant a scoped, passwordless sudo rule for exactly this script there."
+            )
+
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        pull = subprocess.run(
+            [LIMACTL_BIN, "copy", f"{self.vm_name}:{self.STAGING_PATH}", str(out_path)],
+            capture_output=True, text=True, timeout=60,
+        )
+        if pull.returncode != 0:
+            raise ReportError(
+                f"audit collector ran inside {self.vm_name} but pulling its output back failed "
+                f"(rc={pull.returncode}): {pull.stderr.strip()}"
+            )
+
+        subprocess.run(
+            [LIMACTL_BIN, "shell", self.vm_name, "--", "rm", "-f", self.STAGING_PATH],
+            capture_output=True, timeout=15,
+        )
+        return out_path

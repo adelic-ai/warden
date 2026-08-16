@@ -12,7 +12,8 @@ import pytest
 from warden.auditd import AuditRuleLoadError, generate_rule, rule_key
 from warden.idmap import IdRange
 from warden.lima import LIMACTL_BIN
-from warden.lima_auditd import LimaAuditRuleInstaller, LimaEventSource
+from warden.lima_auditd import LimaAuditCollector, LimaAuditRuleInstaller, LimaEventSource
+from warden.report import ReportError
 
 
 def _proc(returncode, stdout="", stderr=""):
@@ -122,3 +123,46 @@ def test_event_source_poll_returns_empty_on_failure_not_a_crash(monkeypatch):
     source = LimaEventSource("warden-lima", "warden-dev")
 
     assert source.poll() == []
+
+
+def test_collector_runs_script_inside_vm_then_pulls_result_back(monkeypatch, tmp_path):
+    rec = _Recorder()
+    monkeypatch.setattr(subprocess, "run", rec)
+    collector = LimaAuditCollector("warden-lima")
+    out_path = tmp_path / "runs" / "audit.raw"
+
+    result = collector.collect("warden-warden-dev", out_path, 501)
+
+    assert result == out_path
+    run_calls = [c for c in rec.calls if "warden-collect-audit.sh" in " ".join(c)]
+    assert len(run_calls) == 1
+    assert run_calls[0][:3] == [LIMACTL_BIN, "shell", "warden-lima"]
+    assert "sudo" in run_calls[0]
+    pull_calls = [c for c in rec.calls if c[:2] == [LIMACTL_BIN, "copy"]]
+    assert len(pull_calls) == 1
+    assert pull_calls[0][2] == "warden-lima:/tmp/warden-audit-collect.raw"
+    assert pull_calls[0][3] == str(out_path)
+    # run happens before pull
+    run_idx = rec.calls.index(run_calls[0])
+    pull_idx = rec.calls.index(pull_calls[0])
+    assert run_idx < pull_idx
+
+
+def test_collector_raises_report_error_when_script_fails(monkeypatch, tmp_path):
+    rec = _Recorder()
+    rec.results["warden-collect-audit.sh"] = _proc(1, stderr="sudo: a password is required")
+    monkeypatch.setattr(subprocess, "run", rec)
+    collector = LimaAuditCollector("warden-lima")
+
+    with pytest.raises(ReportError, match="audit collector failed inside warden-lima"):
+        collector.collect("warden-warden-dev", tmp_path / "audit.raw", 501)
+
+
+def test_collector_raises_report_error_when_pull_back_fails(monkeypatch, tmp_path):
+    rec = _Recorder()
+    rec.results[f"{LIMACTL_BIN} copy"] = _proc(1, stderr="no such file")
+    monkeypatch.setattr(subprocess, "run", rec)
+    collector = LimaAuditCollector("warden-lima")
+
+    with pytest.raises(ReportError, match="pulling its output back failed"):
+        collector.collect("warden-warden-dev", tmp_path / "audit.raw", 501)
