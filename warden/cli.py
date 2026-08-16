@@ -23,6 +23,8 @@ from warden.config import NeedsHumanError, build_config, resolve_llm_auth
 from warden.deploy import DeployError, deploy_code
 from warden.example_prompt import EXAMPLE_PROMPT
 from warden.incus import IncusCommandError, IncusNotFoundError, RealIncusClient
+from warden.lima import DEFAULT_NAME as LIMA_DEFAULT_NAME
+from warden.lima_client import LimaIncusClient
 from warden.mold import MoldError, build_vantage_mold
 from warden.proxy import RealProxyAllowlistController, run_forever
 from warden.recover import SubstrateUnrecovered, diagnose_and_recover, run_with_recovery
@@ -80,6 +82,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--pool", default=profiles.STORAGE_POOL,
         help="storage pool; created (btrfs) if absent",
     )
+    _add_lima_flags(up)
 
     run = sub.add_parser(
         "run",
@@ -102,6 +105,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--timeout", type=float, default=workload.DEFAULT_WALL_CLOCK_SECONDS,
         help="wall-clock cap in seconds; a capped run is recorded as truncated, not as a failure",
     )
+    _add_lima_flags(run)
 
     report = sub.add_parser(
         "report",
@@ -142,6 +146,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     report.add_argument("--vantage-name", default=VANTAGE_DEFAULT_NAME, help="--vantage only")
     report.add_argument("--vantage-project", default=VANTAGE_DEFAULT_PROJECT, help="--vantage only")
+    _add_lima_flags(report)
 
     export = sub.add_parser("export", help="tar everything out: copy all, nothing summarised")
     export.add_argument("dest", type=Path, help="directory to write the tarball into")
@@ -150,12 +155,14 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("--llm", choices=["claude", "gemini"], required=True)
     export.add_argument("--project", default="warden")
     export.add_argument("--out", type=Path, default=DEFAULT_RUNS_DIR, help="host artifact root")
+    _add_lima_flags(export)
 
     down = sub.add_parser("down", help="remove a sandboxed instance (host substrate is unchanged)")
     down.add_argument("instance")
     down.add_argument("--project", default="warden")
     down.add_argument("--force", action="store_true",
                       help="delete even a persistent dev home (otherwise refused — Fork P)")
+    _add_lima_flags(down)
 
     dev = sub.add_parser(
         "dev",
@@ -192,6 +199,7 @@ def build_parser() -> argparse.ArgumentParser:
     dev.add_argument("--vantage-project", default=VANTAGE_DEFAULT_PROJECT, help="--vantage only")
     dev.add_argument("--vantage-mem", default="3GiB", help="--vantage only")
     dev.add_argument("--vantage-cpu", default="2", help="--vantage only")
+    _add_lima_flags(dev)
 
     vantage_mold = sub.add_parser(
         "vantage-mold",
@@ -233,6 +241,7 @@ def build_parser() -> argparse.ArgumentParser:
     # skip the re-derive-and-re-prove and leave the plane pointed at a dead
     # range — the exact I6-breaks-I5 failure `restore` exists to prevent.
     restore.add_argument("--audit", action="store_true")
+    _add_lima_flags(restore)
 
     verify = sub.add_parser(
         "verify",
@@ -248,6 +257,7 @@ def build_parser() -> argparse.ArgumentParser:
                         help="a NON-allowlisted host that must be blocked (default: example.com)")
     verify.add_argument("--lan-gateway", default=None,
                         help="optional LAN gateway IP that must be unreachable (e.g. from `ip route`)")
+    _add_lima_flags(verify)
 
     recover = sub.add_parser(
         "recover",
@@ -257,8 +267,34 @@ def build_parser() -> argparse.ArgumentParser:
     recover.add_argument("--instance", default=None,
                          help="also probe this instance for a hung agent (the L2 check)")
     recover.add_argument("--project", default="warden")
+    _add_lima_flags(recover)
 
     return parser
+
+
+def _add_lima_flags(parser: argparse.ArgumentParser) -> None:
+    """`--lima`/`--lima-name`: target a Lima VM's own Incus daemon (via `limactl shell`) instead of
+    a local one — the Mac path. Deliberately NOT offered on the `--vantage`/`vantage-mold` commands:
+    on Mac, the Lima VM's own kernel already sits where pop-os's nested vantage VM sits — the
+    container's separation from the host — so the direct (this) path is what reaches it, not the
+    machinery pop-os needs to manufacture that separation by nesting a second kernel it doesn't
+    otherwise have."""
+    parser.add_argument(
+        "--lima", action="store_true",
+        help="target a Lima VM's own Incus daemon instead of a local one — the Mac path; the VM "
+             "must already be bootstrapped (see warden/lima.py, VANTAGE-SETUP.md)",
+    )
+    parser.add_argument("--lima-name", default=LIMA_DEFAULT_NAME, help="--lima only")
+
+
+def _build_client(args: argparse.Namespace):
+    """The one place that picks which real `IncusClient` a command drives — local, or inside a Lima
+    VM. Everything downstream (`WardenApp`, `Reporter`, `Exporter`, ...) only ever sees the
+    `IncusClient` Protocol and has no idea which one it got — same seam that already lets
+    `FakeIncusClient` stand in for tests."""
+    if getattr(args, "lima", False):
+        return LimaIncusClient(args.lima_name)
+    return RealIncusClient()
 
 
 def _up(args: argparse.Namespace) -> int:
@@ -284,7 +320,7 @@ def _up(args: argparse.Namespace) -> int:
         return 2
 
     args.allowlist_file.parent.mkdir(parents=True, exist_ok=True)
-    client = RealIncusClient()
+    client = _build_client(args)
     audit_installer = RealAuditRuleInstaller()
     app = WardenApp(
         client,
@@ -353,7 +389,7 @@ def _run(args: argparse.Namespace) -> int:
         return 2
 
     runner = WorkloadRunner(
-        RealIncusClient(),
+        _build_client(args),
         proxy_controller=RealProxyAllowlistController(
             args.allowlist_file, bind=profiles.BRIDGE_GATEWAY, port=profiles.PROXY_PORT,
             upstream_proxy=os.environ.get(profiles.UPSTREAM_PROXY_ENV_VAR),
@@ -480,6 +516,13 @@ def _report(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
+    if vantage and getattr(args, "lima", False):
+        print(
+            "error: --vantage and --lima solve the same problem two different ways — pick one "
+            "(same reason `dev --vantage --lima` is refused).",
+            file=sys.stderr,
+        )
+        return 2
     if vantage:
         return _report_vantage(args)
     flavor = "dev" if live else args.flavor
@@ -491,7 +534,7 @@ def _report(args: argparse.Namespace) -> int:
     out = run_dir_for(args.out, cfg.project, cfg.instance)
 
     reporter = Reporter(
-        RealIncusClient(),
+        _build_client(args),
         event_source_factory=lambda inst: RealEventSource(inst),
     )
     try:
@@ -564,7 +607,7 @@ def _export(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        result = Exporter(RealIncusClient()).export(
+        result = Exporter(_build_client(args)).export(
             cfg, RunManifest.load(manifest_path), run_dir, args.dest
         )
     except IncusNotFoundError as exc:
@@ -583,7 +626,7 @@ def _export(args: argparse.Namespace) -> int:
 
 
 def _down(args: argparse.Namespace) -> int:
-    client = RealIncusClient()
+    client = _build_client(args)
     # The audit installer is wired here too: `down` must take the
     # instance's audit rule with it, or the next instance to be allocated
     # that uid range gets captured under a dead instance's key.
@@ -601,6 +644,14 @@ def _down(args: argparse.Namespace) -> int:
 
 
 def _dev(args: argparse.Namespace) -> int:
+    if args.vantage and args.lima:
+        print(
+            "error: --vantage and --lima solve the same problem two different ways — --vantage "
+            "nests a VM to manufacture a kernel above the container, --lima's own VM already IS "
+            "that kernel. Pick one.",
+            file=sys.stderr,
+        )
+        return 2
     if args.vantage:
         return _dev_vantage(args)
     cfg = build_config(
@@ -609,7 +660,7 @@ def _dev(args: argparse.Namespace) -> int:
     )
     args.allowlist_file.parent.mkdir(parents=True, exist_ok=True)
     app = WardenApp(
-        RealIncusClient(),
+        _build_client(args),
         audit_installer=RealAuditRuleInstaller(),
         event_source_factory=lambda inst: RealEventSource(inst),
         proxy_controller=RealProxyAllowlistController(
@@ -799,7 +850,7 @@ def _restore(args: argparse.Namespace) -> int:
         instance=args.instance, flavor=args.flavor, llm=args.llm,
         project=args.project, audit=args.audit,
     )
-    client = RealIncusClient()
+    client = _build_client(args)
     app = WardenApp(
         client,
         audit_installer=RealAuditRuleInstaller(),
@@ -829,7 +880,7 @@ def _verify(args: argparse.Namespace) -> int:
         project=args.project, audit=args.audit,
     )
     app = WardenApp(
-        RealIncusClient(),
+        _build_client(args),
         audit_installer=RealAuditRuleInstaller(),
         event_source_factory=lambda inst: RealEventSource(inst),
         # verify only reads/probes; no allowlist file is written, so no proxy controller is needed.
@@ -853,7 +904,7 @@ def _verify(args: argparse.Namespace) -> int:
 
 
 def _recover(args: argparse.Namespace) -> int:
-    client = RealIncusClient()
+    client = _build_client(args)
     try:
         result = diagnose_and_recover(client, instance=args.instance, project=args.project)
     except IncusNotFoundError as exc:
