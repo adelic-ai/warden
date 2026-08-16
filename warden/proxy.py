@@ -18,12 +18,15 @@ ACL is never disabled, just re-scoped.
 from __future__ import annotations
 
 import asyncio
+import shlex
 import socket
 import subprocess
 import sys
 import time
 from pathlib import Path
 from typing import Protocol
+
+from warden.lima import LIMACTL_BIN
 
 CONNECT_OK = b"HTTP/1.1 200 Connection Established\r\n\r\n"
 CONNECT_FORBIDDEN = b"HTTP/1.1 403 Forbidden\r\n\r\n"
@@ -112,6 +115,48 @@ class RealProxyAllowlistController:
             write_allowlist(self.allowlist_path, [])
         return ensure_running(
             self.allowlist_path, self.bind, self.port, upstream_proxy=self.upstream_proxy
+        )
+
+
+class LimaProxyAllowlistController:
+    """Same job as `RealProxyAllowlistController`, but the proxy has to run *inside* the Lima VM,
+    not locally — `BRIDGE_GATEWAY` (e.g. 172.29.0.1) only exists inside the guest, same reason
+    `LimaIncusClient` routes every Incus command through `limactl shell` instead of running `incus`
+    directly. Real-host gap, found running `warden dev --lima` end to end for the first time: the
+    proxy tried to bind that address locally and failed outright, since it doesn't exist on the Mac.
+
+    `allowlist_path` is the SAME path on both sides — Lima's default home-directory mount makes it
+    visible inside the guest at the identical path, which is all the proxy needs, since it only
+    *reads* that file. That mount is read-only from the guest, though, so the proxy's own log lives
+    guest-local (`/tmp` inside the VM), never under the shared path.
+    """
+
+    def __init__(
+        self,
+        vm_name: str,
+        allowlist_path: Path,
+        bind: str = "127.0.0.1",
+        port: int = 3128,
+        upstream_proxy: str | None = None,
+        pythonpath: str = "",
+    ):
+        self.vm_name = vm_name
+        self.allowlist_path = Path(allowlist_path)
+        self.bind = bind
+        self.port = port
+        self.upstream_proxy = upstream_proxy
+        self.pythonpath = pythonpath
+
+    def set_allowlist(self, domains: tuple[str, ...]) -> None:
+        write_allowlist(self.allowlist_path, list(domains))
+
+    def ensure_running(self) -> bool:
+        if not self.allowlist_path.exists():
+            self.allowlist_path.parent.mkdir(parents=True, exist_ok=True)
+            write_allowlist(self.allowlist_path, [])
+        return ensure_running_lima(
+            self.vm_name, self.allowlist_path, self.bind, self.port,
+            upstream_proxy=self.upstream_proxy, pythonpath=self.pythonpath,
         )
 
 
@@ -401,4 +446,62 @@ def ensure_running(
         time.sleep(0.2)
     raise RuntimeError(
         f"allowlist proxy did not come up on {host}:{port} within {timeout}s — see {log_path}"
+    )
+
+
+def _is_listening_lima(vm_name: str, host: str, port: int, timeout: float = 5.0) -> bool:
+    """Same job as `is_listening`, but `host` (e.g. `BRIDGE_GATEWAY`) only exists inside the guest —
+    checked by asking the guest's own Python to try the connection, not this Mac's."""
+    check = subprocess.run(
+        [
+            LIMACTL_BIN, "shell", vm_name, "--", "python3", "-c",
+            f"import socket,sys; s=socket.socket(); s.settimeout(1); "
+            f"sys.exit(0 if s.connect_ex(({host!r}, {port}))==0 else 1)",
+        ],
+        capture_output=True, timeout=timeout,
+    )
+    return check.returncode == 0
+
+
+def ensure_running_lima(
+    vm_name: str,
+    allowlist_path: Path,
+    host: str,
+    port: int,
+    log_path: str = "/tmp/warden-proxy.log",
+    timeout: float = 15.0,
+    upstream_proxy: str | None = None,
+    pythonpath: str = "",
+) -> bool:
+    """`ensure_running`'s Lima counterpart: spawns the SAME `python3 -m warden.cli proxy` command,
+    but inside the VM via `limactl shell`, backgrounded with `nohup ... &`. Confirmed empirically
+    that this survives the `limactl shell` session closing (no `disown` needed — `sh` doesn't even
+    have it; plain `nohup` + closed stdin was sufficient) — the process shows up with no controlling
+    terminal in a freshly-opened session afterward.
+
+    `log_path` is guest-local (`/tmp` inside the VM), not under `allowlist_path`'s directory — that
+    directory is the shared Lima home-mount, read-only from the guest's side, so writing a log there
+    would fail. Only `allowlist_path` itself needs to be shared; the proxy never writes to it.
+    """
+    if _is_listening_lima(vm_name, host, port):
+        return False
+    argv = (
+        f"nohup env PYTHONPATH={shlex.quote(pythonpath)} python3 -m warden.cli proxy "
+        f"--allowlist-file {shlex.quote(str(allowlist_path))} --bind {shlex.quote(host)} "
+        f"--port {port}"
+    )
+    if upstream_proxy is not None:
+        argv += f" --upstream-proxy {shlex.quote(upstream_proxy)}"
+    argv += f" > {shlex.quote(log_path)} 2>&1 < /dev/null &"
+    subprocess.run(
+        [LIMACTL_BIN, "shell", vm_name, "--", "sh", "-c", argv], timeout=15.0, capture_output=True
+    )
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _is_listening_lima(vm_name, host, port):
+            return True
+        time.sleep(0.5)
+    raise RuntimeError(
+        f"allowlist proxy did not come up on {vm_name}:{host}:{port} within {timeout}s — "
+        f"see {log_path} inside the VM (`limactl shell {vm_name} -- cat {log_path}`)"
     )

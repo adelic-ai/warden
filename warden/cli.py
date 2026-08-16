@@ -26,7 +26,7 @@ from warden.incus import IncusCommandError, IncusNotFoundError, RealIncusClient
 from warden.lima import DEFAULT_NAME as LIMA_DEFAULT_NAME
 from warden.lima_client import LimaIncusClient
 from warden.mold import MoldError, build_vantage_mold
-from warden.proxy import RealProxyAllowlistController, run_forever
+from warden.proxy import LimaProxyAllowlistController, RealProxyAllowlistController, run_forever
 from warden.recover import SubstrateUnrecovered, diagnose_and_recover, run_with_recovery
 from warden.remote_dev import RemoteDevError, create_nested_dev, enter_nested_shell
 from warden.remote_report import RemoteReportError, report_nested_live
@@ -297,6 +297,31 @@ def _build_client(args: argparse.Namespace):
     return RealIncusClient()
 
 
+def _build_proxy_controller(args: argparse.Namespace):
+    """The allowlist proxy is warden's own standing daemon, not an Incus command — `LimaIncusClient`
+    doesn't cover it. `BRIDGE_GATEWAY` only exists inside the Lima VM, so on `--lima` the proxy has
+    to run there too, via `LimaProxyAllowlistController` (real-host gap, found running `dev --lima`
+    end to end: the proxy tried to bind that address locally and failed, since it doesn't exist on
+    the Mac).
+
+    `pythonpath` assumes this checkout lives under the operator's home directory — Lima's default
+    mount only covers `$HOME`, so a warden clone anywhere else won't be visible inside the guest and
+    this will fail to find `warden.cli` there. Not something this function can fix; a checkout
+    location constraint worth stating plainly rather than silently assuming.
+    """
+    if getattr(args, "lima", False):
+        return LimaProxyAllowlistController(
+            args.lima_name, args.allowlist_file,
+            bind=profiles.BRIDGE_GATEWAY, port=profiles.PROXY_PORT,
+            upstream_proxy=os.environ.get(profiles.UPSTREAM_PROXY_ENV_VAR),
+            pythonpath=str(Path(__file__).resolve().parent.parent),
+        )
+    return RealProxyAllowlistController(
+        args.allowlist_file, bind=profiles.BRIDGE_GATEWAY, port=profiles.PROXY_PORT,
+        upstream_proxy=os.environ.get(profiles.UPSTREAM_PROXY_ENV_VAR),
+    )
+
+
 def _up(args: argparse.Namespace) -> int:
     instance = args.name or f"warden-{args.flavor}"
     cfg = build_config(
@@ -326,10 +351,7 @@ def _up(args: argparse.Namespace) -> int:
         client,
         audit_installer=audit_installer,
         event_source_factory=lambda inst: RealEventSource(inst),
-        proxy_controller=RealProxyAllowlistController(
-            args.allowlist_file, bind=profiles.BRIDGE_GATEWAY, port=profiles.PROXY_PORT,
-            upstream_proxy=os.environ.get(profiles.UPSTREAM_PROXY_ENV_VAR),
-        ),
+        proxy_controller=_build_proxy_controller(args),
         pool=args.pool,
     )
     try:
@@ -390,10 +412,7 @@ def _run(args: argparse.Namespace) -> int:
 
     runner = WorkloadRunner(
         _build_client(args),
-        proxy_controller=RealProxyAllowlistController(
-            args.allowlist_file, bind=profiles.BRIDGE_GATEWAY, port=profiles.PROXY_PORT,
-            upstream_proxy=os.environ.get(profiles.UPSTREAM_PROXY_ENV_VAR),
-        ),
+        proxy_controller=_build_proxy_controller(args),
     )
     try:
         manifest = runner.run(
@@ -663,10 +682,7 @@ def _dev(args: argparse.Namespace) -> int:
         _build_client(args),
         audit_installer=RealAuditRuleInstaller(),
         event_source_factory=lambda inst: RealEventSource(inst),
-        proxy_controller=RealProxyAllowlistController(
-            args.allowlist_file, bind=profiles.BRIDGE_GATEWAY, port=profiles.PROXY_PORT,
-            upstream_proxy=os.environ.get(profiles.UPSTREAM_PROXY_ENV_VAR),
-        ),
+        proxy_controller=_build_proxy_controller(args),
         pool=args.pool,
     )
     try:
